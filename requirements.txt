@@ -1,0 +1,17 @@
+astropy
+babamul
+bilby
+extinction
+lightcurvelynx
+matplotlib
+numpy
+otter
+pandas
+pydantic
+python-dotenv
+redback
+requests
+scipy
+seaborn
+tqdm
+PyYAML
