@@ -1,25 +1,19 @@
-import base64
-import gzip
-import json
-import math
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
+from zoneinfo import ZoneInfo
+
+import astropy.units as u
 import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import requests
+from astropy.coordinates import SkyCoord
+from astropy.time import Time
 from matplotlib import rcParams
 rcParams["font.family"] = "Liberation Serif"
-from astropy.time import Time
-from astropy.coordinates import SkyCoord
-import astropy.units as u
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-from collections import Counter, defaultdict
-import requests
-import pandas as pd
-from io import StringIO
-import babamul
-from babamul import LsstAlert, ZtfAlert
-from pydantic import ValidationError
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -33,7 +27,7 @@ BAND_COLORS = {
     "?": "#aec7e8",
 }
 
-# FIXME: verify and cite field coords
+# FIXME: cite field coords
 _DDF_CENTERS = {
     "COSMOS":    SkyCoord(150.1191,  2.2058,  unit="deg"),
     "XMM-LSS":  SkyCoord( 35.708,  -4.750,   unit="deg"),
@@ -57,394 +51,22 @@ _WEATHER_VARS = [
     "temperature_2m",
 ]
 
-# ── Alert fetching ─────────────────────────────────────────────────────────────
-
-def babamul_get_alerts(
-    survey="LSST",
-    *,
-    object_id: str | None = None,
-    ra: float | None = None,
-    dec: float | None = None,
-    radius_arcsec: float | None = None,
-    start_time: float | str | None = None,
-    end_time: float | str | None = None,
-    min_magpsf: float | None = None,
-    max_magpsf: float | None = None,
-    min_drb: float | None = None,
-    max_drb: float | None = None,
-    is_rock: bool | None = None,
-    is_star: bool | None = None,
-    is_near_brightstar: bool | None = None,
-    is_stationary: bool | None = None,
-    checkpoint_path: str | None = None,
-    checkpoint_every: int = 10,
-):
-    """
-    Thin wrapper around babamul.api.get_alerts.
-
-    Parameters
-    ----------
-    survey : str
-        Survey to query ("ZTF" or "LSST"), default "LSST".
-    object_id : str | None
-        Filter by object ID.
-    ra : float | None
-        Right Ascension in degrees (requires dec and radius_arcsec).
-    dec : float | None
-        Declination in degrees (requires ra and radius_arcsec).
-    radius_arcsec : float | None
-        Cone search radius in arcseconds (max 600).
-    start_jd : float | str | None
-        Start filter as a JD float or date string "MM-DD-YYYY".
-    end_jd : float | str | None
-        End filter as a JD float or date string "MM-DD-YYYY".
-    min_magpsf : float | None
-        Minimum PSF magnitude filter.
-    max_magpsf : float | None
-        Maximum PSF magnitude filter.
-    min_drb : float | None
-        Minimum DRB (reliability) score filter.
-    max_drb : float | None
-        Maximum DRB score filter.
-    is_rock : bool | None
-        Filter for likely solar system objects.
-    is_star : bool | None
-        Filter for likely stellar sources.
-    is_near_brightstar : bool | None
-        Filter for sources near bright stars.
-    is_stationary : bool | None
-        Filter for likely stationary sources.
-
-    Returns
-    -------
-    list of ZtfAlert | LsstAlert
-    """
-    def _to_jd(val):
-        if isinstance(val, str):
-            return Time(datetime.strptime(val, "%m-%d-%Y"), format="datetime", scale="utc").jd
-        return val
-
-    if start_time is None:
-        start_time = "04-01-2026"
-    if end_time is None:
-        end_time = datetime.utcnow().strftime("%m-%d-%Y")
-
-    alert_model = ZtfAlert if survey == "ZTF" else LsstAlert
-    _base_params = {k: v for k, v in {
-        "object_id": object_id, "ra": ra, "dec": dec,
-        "radius_arcsec": radius_arcsec,
-        "min_magpsf": min_magpsf, "max_magpsf": max_magpsf,
-        "min_drb": min_drb, "max_drb": max_drb,
-        "is_rock": is_rock, "is_star": is_star,
-        "is_near_brightstar": is_near_brightstar, "is_stationary": is_stationary,
-    }.items() if v is not None}
-
-    def _fetch_raw(start_jd, end_jd, chunk_size=1/96):
-        """Fetch raw alerts, splitting into 15-min then 5-min chunks if the 100k cap is hit."""
-        params = {**_base_params, **({} if start_jd is None else {"start_jd": start_jd}), **({} if end_jd is None else {"end_jd": end_jd})}
-        response = babamul.api._request("GET", f"/surveys/{survey}/alerts", params=params)
-        raw = response.get("data", [])
-        if len(raw) == 100_000:
-            window = end_jd - start_jd
-            min_chunk = 1/288  # 5 minutes
-            if window <= min_chunk:
-                print(f"  WARNING: JD {start_jd:.4f}–{end_jd:.4f} ({window*24*60:.0f} min) still at cap — results may be truncated")
-                return raw
-            next_chunk = min_chunk if window <= chunk_size else chunk_size
-            print(f"  cap hit JD {start_jd:.4f}–{end_jd:.4f} ({window*24*60:.0f} min), splitting into {next_chunk*24*60:.0f}-min chunks")
-            results = []
-            t = start_jd
-            while t < end_jd:
-                t_end = min(t + next_chunk, end_jd)
-                results.extend(_fetch_raw(t, t_end, chunk_size))
-                t = t_end
-            return results
-        return raw
-
-    def _fetch_and_validate(start_jd, end_jd):
-        start_str = f"{start_jd:.5f}" if start_jd is not None else "any"
-        end_str = f"{end_jd:.5f}" if end_jd is not None else "any"
-        print(f"Fetching alerts for JD {start_str} to {end_str}...")
-        raw_alerts = _fetch_raw(start_jd, end_jd)
-        valid, skipped = [], []
-        for raw in raw_alerts:
-            try:
-                valid.append(alert_model.model_validate(raw))
-            except ValidationError:
-                skipped.append(raw)
-        return valid, skipped
-
-    def _jd_to_datestr(jd):
-        return Time(jd, format="jd").strftime("%m-%d-%Y")
-
-    def _save_chunk(alerts, chunk_start_jd, chunk_end_jd, base_path):
-        path = Path(base_path) / f"alerts_{survey}_{_jd_to_datestr(chunk_start_jd)}_to_{_jd_to_datestr(chunk_end_jd)}.json.gz"
-        save_alerts(alerts, path)
-        return path
-
-    start = _to_jd(start_time)
-    end   = _to_jd(end_time)
-
-    base_path = checkpoint_path or "data/lsst_alert_download/raw_files"
-    Path(base_path).mkdir(parents=True, exist_ok=True)
-
-    all_alerts, all_skipped = [], []
-
-    if start is None or end is None or math.ceil(end) - math.floor(start) <= 1:
-        all_alerts, all_skipped = _fetch_and_validate(start, end)
-    else:
-        chunk_alerts = []
-        chunk_start_jd = math.floor(start)
-        last_saved_jd = None
-        night_start = math.floor(start)
-
-        try:
-            while night_start < math.ceil(end):
-                valid, skipped = _fetch_and_validate(
-                    float(night_start), float(min(night_start + 1, end))
-                )
-                chunk_alerts.extend(valid)
-                all_skipped.extend(skipped)
-                night_start += 1
-
-                nights_in_chunk = night_start - chunk_start_jd
-                if nights_in_chunk >= checkpoint_every:
-                    _save_chunk(chunk_alerts, chunk_start_jd, night_start, base_path)
-                    last_saved_jd = night_start
-                    all_alerts.extend(chunk_alerts)
-                    chunk_alerts = []
-                    chunk_start_jd = night_start
-
-        except (KeyboardInterrupt, Exception) as e:
-            if chunk_alerts:
-                path = _save_chunk(chunk_alerts, chunk_start_jd, night_start, base_path)
-                all_alerts.extend(chunk_alerts)
-                print(f"\nInterrupted. Saved partial chunk to {path}.")
-            if last_saved_jd:
-                print(f"Last completed checkpoint: up to {_jd_to_datestr(last_saved_jd)} (JD {last_saved_jd}).")
-                print(f"To resume, set start_time=\"{_jd_to_datestr(last_saved_jd)}\".")
-            if not isinstance(e, KeyboardInterrupt):
-                print(f"Error: {e}")
-            return all_alerts
-
-        # save any remaining nights
-        if chunk_alerts:
-            _save_chunk(chunk_alerts, chunk_start_jd, night_start, base_path)
-            all_alerts.extend(chunk_alerts)
-
-    if all_skipped:
-        skipped_jds = [
-            r.get("candidate", {}).get("jd") or r.get("candidate", {}).get("midpointMjdTai")
-            for r in all_skipped
-            if (r.get("candidate", {}).get("jd") or r.get("candidate", {}).get("midpointMjdTai"))
-        ]
-        print(f"Skipped {len(all_skipped):,} invalid alerts.")
-
-    return all_alerts
-
-# ── I/O ───────────────────────────────────────────────────────────────────────
-
-def save_alerts(alerts, path="alerts.json.gz"):
-    """
-    Save a list of ZtfAlert or LsstAlert objects to a gzip-compressed JSON file.
-    If the file already exists, appends new alerts, skipping any whose objectId
-    is already present.
-
-    Parameters
-    ----------
-    alerts : list of ZtfAlert | LsstAlert
-    path : str or Path
-        Destination file path. Defaults to "alerts.json.gz".
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _object_hook(obj):
-        if "__bytes__" in obj:
-            return base64.b64decode(obj["__bytes__"])
-        return obj
-
-    def _default(obj):
-        if isinstance(obj, bytes):
-            return {"__bytes__": base64.b64encode(obj).decode()}
-        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
-    existing = []
-    existing_ids = set()
-    if path.exists():
-        try:
-            with gzip.open(path, "rt") as f:
-                existing = json.load(f, object_hook=_object_hook)
-            existing_ids = {r.get("objectId") for r in existing}
-        except (json.JSONDecodeError, EOFError, OSError) as e:
-            print(f"Warning: could not read existing file ({e}), starting fresh.")
-            existing = []
-
-    new_records = [a.model_dump() for a in alerts if a.objectId not in existing_ids]
-    skipped = len(alerts) - len(new_records)
-
-    with gzip.open(path, "wt") as f:
-        json.dump(existing + new_records, f, default=_default)
-
-    print(f"Saved {len(new_records):,} new alerts to {path} (skipped {skipped:,} duplicates, {len(existing):,} already existed).")
-
-
-def save_objects(ids, path="objects.json.gz"):
-    """
-    Save a list of object IDs to a gzip-compressed JSON file.
-    If the file already exists, appends new IDs, skipping duplicates.
-
-    Parameters
-    ----------
-    ids : list of str
-    path : str or Path
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    existing_ids = set()
-    if path.exists():
-        try:
-            with gzip.open(path, "rt") as f:
-                existing_ids = set(json.load(f))
-        except (json.JSONDecodeError, EOFError, OSError) as e:
-            print(f"Warning: could not read existing file ({e}), starting fresh.")
-
-    new_ids = [i for i in ids if i not in existing_ids]
-    skipped = len(ids) - len(new_ids)
-
-    with gzip.open(path, "wt") as f:
-        json.dump(list(existing_ids) + new_ids, f)
-
-    print(f"Saved {len(new_ids):,} new object IDs to {path} (skipped {skipped:,} duplicates, {len(existing_ids):,} already existed).")
-
-
-def load_objects(path):
-    """
-    Load a list of object IDs saved by save_objects.
-
-    Parameters
-    ----------
-    path : str or Path
-
-    Returns
-    -------
-    list of str
-    """
-    with gzip.open(Path(path), "rt") as f:
-        ids = json.load(f)
-    print(f"Loaded {len(ids):,} object IDs from {path}.")
-    return ids
-
-
-def fetch_latest_alerts(object_ids, survey="LSST"):
-    """
-    Fetch the most recent alert for each object ID.
-
-    Parameters
-    ----------
-    object_ids : list of str
-    survey : str
-        "LSST" or "ZTF". Default "LSST".
-
-    Returns
-    -------
-    list of ZtfAlert | LsstAlert
-        One alert per object ID (the most recent by JD/MJD).
-    """
-    latest = []
-    for oid in object_ids:
-        alerts = babamul_get_alerts(survey=survey, object_id=oid)
-        if not alerts:
-            continue
-        most_recent = max(
-            alerts,
-            key=lambda a: a.candidate.jd if hasattr(a.candidate, "jd") else a.candidate.midpointMjdTai,
-        )
-        latest.append(most_recent)
-    print(f"Fetched latest alert for {len(latest):,}/{len(object_ids):,} objects.")
-    return latest
-
-
-def load_alerts(path, survey="LSST"):
-    """
-    Load alerts from a gzip-compressed JSON file saved by save_alerts.
-
-    Parameters
-    ----------
-    path : str or Path
-    survey : str
-        "LSST" or "ZTF", used to select the correct model class.
-
-    Returns
-    -------
-    list of ZtfAlert | LsstAlert
-    """
-    def _object_hook(obj):
-        if "__bytes__" in obj:
-            return base64.b64decode(obj["__bytes__"])
-        return obj
-
-    from babamul import LsstAlert, ZtfAlert
-    model = ZtfAlert if survey == "ZTF" else LsstAlert
-    with gzip.open(Path(path), "rt") as f:
-        data = json.load(f, object_hook=_object_hook)
-    print(f"Loaded {len(data):,} alerts from {path}.")
-    return [model.model_validate(a) for a in data]
-
-
-def combine_alert_files(input_dir, output_path, pattern="*.json.gz", input_files=None, delete_raw=False):
-    """
-    Combine alert chunk files into a single .json.gz file.
-
-    Parameters
-    ----------
-    input_dir : str or Path
-        Directory containing chunk files (e.g. "data/lsst_alert_download/raw_files").
-    output_path : str or Path
-        Destination file for the combined output.
-    pattern : str
-        Glob pattern to match chunk files. Default "*.json.gz". Ignored if input_files is given.
-    input_files : list of str, optional
-        Specific filenames (within input_dir) to combine. If provided, pattern is ignored.
-    delete_raw : bool
-        If True, delete the input chunk files after combining. Default False.
-    """
-    input_dir = Path(input_dir)
-    if input_files is not None:
-        files = [input_dir / f for f in input_files]
-        missing = [f for f in files if not f.exists()]
-        if missing:
-            raise FileNotFoundError(f"Missing files: {[str(f) for f in missing]}")
-    else:
-        files = sorted(input_dir.glob(pattern))
-    if not files:
-        print(f"No files matching '{pattern}' found in {input_dir}.")
-        return
-
-    combined = []
-    for f in files:
-        with gzip.open(f, "rt") as fh:
-            combined.extend(json.load(fh))
-        print(f"  {f.name}: {len(combined):,} alerts total")
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(output_path, "wt") as fh:
-        json.dump(combined, fh)
-    print(f"Saved {len(combined):,} alerts to {output_path}.")
-
-    if delete_raw:
-        for f in files:
-            f.unlink()
-        print(f"Deleted {len(files)} raw chunk files from {input_dir}.")
+# setting labeling for skymap plot
+_DDF_LABEL_OFFSETS = {
+    "COSMOS":    (6, -14),  # shifted down to avoid overlap with RA axis labels
+    "XMM-LSS":  (6,   4),
+    "ELAIS-S1": (6,   4),
+    "ECDFS":    (6,   4),
+    "EDFS-a":   (10, -18),  # shifted further down from EDFS-b
+    "EDFS-b":   (6,   4),
+}
 
 
 # ── Summaries ──────────────────────────────────────────────────────────────────
 
 def summarize_night(alerts):
     """
-    Print summary statistics for a list of LsstAlerts from a single night.
+    Print summary statistics for a list of LsstAlerts.
 
     Covers: total alerts, unique objects, visit count, UTC time window,
     and per-filter breakdown of alert count, visits, and magnitude range.
@@ -474,7 +96,7 @@ def summarize_night(alerts):
         mags = [a.candidate.magpsf for a in ba if a.candidate.magpsf is not None]
         band_mags[band] = (np.median(mags), min(mags), max(mags)) if mags else (None, None, None)
 
-    print("=== Night Summary ===")
+    print("=== Night(s) Summary ===")
     print(f"  Alerts:         {n_alerts:>7,}")
     print(f"  Unique objects: {n_objects:>7,}")
     print(f"  Unique visits:  {n_visits:>7,}")
@@ -548,15 +170,6 @@ def plot_alert_property(alerts, field, bins=30, log_scale=True):
     plt.show()
 
 
-_DDF_LABEL_OFFSETS = {
-    "COSMOS":    (6, -14),  # shifted down to avoid overlap with RA axis labels
-    "XMM-LSS":  (6,   4),
-    "ELAIS-S1": (6,   4),
-    "ECDFS":    (6,   4),
-    "EDFS-a":   (10, -18),  # shifted further down from EDFS-b
-    "EDFS-b":   (6,   4),
-}
-
 def _draw_ddf_markers(ax, mollweide=True):
     """Draw DDF field centres as labelled circles on ax."""
     for name, center in _DDF_CENTERS.items():
@@ -577,7 +190,18 @@ def _draw_ddf_markers(ax, mollweide=True):
                     color="white", fontsize=17, fontweight="bold", alpha=0.9, zorder=3)
 
 
-def plot_skymap(alerts, title=None, heatmap=False, bin_size_deg=3.5, plot_ddf=False):
+def _save_plot(fig, title=None):
+    _repo_root = Path(__file__).resolve().parents[3]
+    plots_dir = _repo_root / "data" / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    slug = (title or "skymap").lower()
+    slug = "".join(c if c.isalnum() else "_" for c in slug).strip("_")
+    path = plots_dir / f"{slug}.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    print(f"Saved plot to {path}")
+
+
+def plot_skymap(alerts, title=None, heatmap=False, bin_size_deg=3.5, plot_ddf=False, save=False):
     """
     Full-sky Mollweide projection with zoomed footprint inset and band legend.
     Colored by filter, sized by brightness (larger = brighter).
@@ -652,10 +276,11 @@ def plot_skymap(alerts, title=None, heatmap=False, bin_size_deg=3.5, plot_ddf=Fa
             color="white", pad=14, fontsize=32,
         )
         plt.tight_layout()
-        plt.show()
+        if save:
+            _save_plot(fig, title)
         return
 
-    # --- original scatter plot ---
+    # --- scatter plot ---
     all_mags  = np.array([a.candidate.magpsf for a in alerts])
     mag_max   = all_mags.max()
     mag_range = (all_mags.max() - all_mags.min()) or 1.0
@@ -727,7 +352,8 @@ def plot_skymap(alerts, title=None, heatmap=False, bin_size_deg=3.5, plot_ddf=Fa
     leg.get_title().set_color("#aaaaaa")
 
     plt.tight_layout()
-    plt.show()
+    if save:
+        _save_plot(fig, title)
 
 # ── Weather ────────────────────────────────────────────────────────────────────
 
@@ -772,10 +398,10 @@ def fetch_rubin_weather(date_str=None):
         "timezone":        "UTC",
     }
 
-    if 0 <= days_ago <= 92:
+    if -1 <= days_ago <= 92:
         url = "https://api.open-meteo.com/v1/forecast"
-        params["past_days"]     = days_ago + 1
-        params["forecast_days"] = 0
+        params["past_days"]     = max(days_ago + 1, 0)
+        params["forecast_days"] = 2 if days_ago < 0 else 0
     else:
         url = "https://archive-api.open-meteo.com/v1/archive"
         params["start_date"] = start_utc.date().isoformat()
@@ -914,57 +540,3 @@ def fetch_rubin_schedule(start_date, end_date=None, token=None):
     label = f"{start_date}{' – ' + end_date if end_date else ''}"
     print(f"fetched {len(df):,} observations ({label}).")
     return df
-
-
-def summarize_schedule(df, field_col="target_name"):
-    """
-    Print summary statistics for a set of Rubin observations.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        From fetch_rubin_schedule.
-    field_col : str
-        Column to use as the field identifier.
-        Common options: "target_name", "fieldId". Check df.columns if unsure.
-    """
-    if df.empty:
-        print("No observations.")
-        return
-
-    print("=== Schedule Summary ===")
-    print(f"  Total observations:  {len(df):,}")
-    print()
-
-    if "execution_status" in df.columns:
-        print("  Execution status:")
-        for status, n in df["execution_status"].value_counts().items():
-            print(f"    {status:<20}  {n:>6,}")
-        executed = df[df["execution_status"].str.lower() == "executed"]
-    else:
-        print("  (execution_status column not found — showing all rows)")
-        executed = df
-
-    if executed.empty:
-        print("\n  No executed observations found.")
-        return
-
-    print(f"\n  Executed: {len(executed):,}")
-
-    # Filter/band breakdown
-    filter_col = next((c for c in ["filter", "band", "em_filter"] if c in executed.columns), None)
-    if filter_col:
-        print(f"\n  Filter breakdown (executed):")
-        for f, n in executed[filter_col].value_counts().sort_index().items():
-            print(f"    {str(f):<6}  {n:>6,}")
-
-    # Visits per field
-    if field_col in executed.columns:
-        field_counts = executed[field_col].value_counts()
-        print(f"\n  Visits per field — top 15 (col: '{field_col}'):")
-        print(f"  {'Field':<30}  {'Visits':>7}")
-        print(f"  {'-----':<30}  {'------':>7}")
-        for field, n in field_counts.head(15).items():
-            print(f"  {str(field):<30}  {n:>7,}")
-    else:
-        print(f"\n  Column '{field_col}' not found. Available: {list(df.columns)}")

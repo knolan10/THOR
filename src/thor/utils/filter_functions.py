@@ -1,23 +1,23 @@
-import io
 import os
-import zipfile
-import babamul
+from pathlib import Path
 from babamul import LsstAlert, ZtfAlert
 from babamul.models import add_cross_matches
-from rubin_stats_functions import babamul_get_alerts
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
-from astropy.table import Table, hstack
+from astropy.table import Table
 import astropy.units as u
 import pandas as pd
 import numpy as np
 from collections import defaultdict
+
+from thor.utils.fetch_alerts import babamul_get_alerts
 
 
 
 def generic_filter(alerts: list[ZtfAlert | LsstAlert]) -> list[ZtfAlert | LsstAlert]:
     """
     Filter with high level cuts to select generically for astrophysical sources.
+    Used when fetching alerts from Babamul API and filtering locally
     https://sdm-schemas.lsst.io/apdb.html
     """
     def _keep(alert: ZtfAlert | LsstAlert) -> bool:
@@ -58,26 +58,6 @@ def generic_filter(alerts: list[ZtfAlert | LsstAlert]) -> list[ZtfAlert | LsstAl
     return [a for a in alerts if _keep(a)]
 
 
-def get_object_alerts(
-    alert: ZtfAlert | LsstAlert,
-) -> list[ZtfAlert | LsstAlert]:
-    """
-    Fetch all available alerts for the object associated with the given alert.
-
-    Calls babamul_get_alerts with the alert's survey and objectId so that
-    multi-band photometry is available for colour computation.
-
-    Parameters
-    ----------
-    alert : ZtfAlert | LsstAlert
-
-    Returns
-    -------
-    list of ZtfAlert | LsstAlert
-        All alerts for that objectId, sorted by JD.
-    """
-    return babamul_get_alerts(survey=alert.survey, object_id=alert.objectId)
-
 
 def _band_mags_from_alerts(
     object_alerts: list[ZtfAlert | LsstAlert],
@@ -87,15 +67,12 @@ def _band_mags_from_alerts(
 
     For ZTF uses candidate.fid + candidate.magpsf.
     For LSST converts candidate.psfFlux (nJy) to AB magnitude using zp=31.4.
-    Only positive-subtraction (isdiffpos) detections are included.
     """
     ZTF_FID = {1: "g", 2: "r", 3: "i"}
     LSST_ZP = 31.4  # AB mag, flux in nJy
 
     band_mags: dict[str, list[float]] = {}
     for a in object_alerts:
-        if not a.candidate.isdiffpos:
-            continue
         if isinstance(a, ZtfAlert):
             band = ZTF_FID.get(a.candidate.fid)
             mag = a.candidate.magpsf
@@ -117,9 +94,7 @@ def _band_series_from_alerts(
     Multiple detections in the same band on the same night (same integer day) are
     collapsed to a single point: the median magnitude at the median time.
 
-    Time is JD for ZTF and MJD for LSST (consistent within a survey; only the
-    ordering matters here, not the absolute value).
-    Only positive-subtraction (isdiffpos) detections with valid flux are included.
+    Time is JD for ZTF and MJD for LSST 
     """
     ZTF_FID = {1: "g", 2: "r", 3: "i"}
     LSST_ZP = 31.4
@@ -127,8 +102,6 @@ def _band_series_from_alerts(
     # group raw detections by (band, night)
     nightly: dict[tuple[str, int], list[tuple[float, float]]] = defaultdict(list)
     for a in object_alerts:
-        if not a.candidate.isdiffpos:
-            continue
         if isinstance(a, ZtfAlert):
             band = ZTF_FID.get(a.candidate.fid)
             mag = a.candidate.magpsf
@@ -162,7 +135,6 @@ def _is_rising(
     least ``min_separation_days``, and those three show a rising brightness trend.
 
     Requires the first such trio per band (greedy earliest selection).
-    A negative magnitude slope = source getting brighter.
     Returns False if no band can produce three sufficiently separated detections.
     """
     series = _band_series_from_alerts(object_alerts)
@@ -197,7 +169,7 @@ def tde_filter(
     Filter alerts for TDE candidates.
 
     Applies the following cuts in order:
-    1. Minimum historical detections (ndethist).
+    1. Minimum historical detections (ndethist) (note - could be covered by rising cut).
     2. Reject alerts with a Milliquas crossmatch within ``milliquas_radius_arcsec``
        (removes known/likely AGN/quasars).
     3. rising FIXME had bug with fetching past alerts, decided to remove for now
@@ -239,8 +211,9 @@ def tde_filter(
     passed = [a for a in passed if not _has_milliquas_match(a)]
     print(f"After Milliquas cut (<={milliquas_radius_arcsec}\"), {len(passed)} remain.")
 
+    #FIXME currently not cutting on rising here - this function had bug
     # # Fetch all per-band alerts once for each surviving object
-    # object_alerts_map = {a.objectId: get_object_alerts(a) for a in passed}
+    # object_alerts_map = {a.objectId: babamul_get_alerts(a) for a in passed}
 
     # # --- 3. Rising brightness cut ---
     # passed = [a for a in passed if _is_rising(object_alerts_map[a.objectId])]
@@ -309,7 +282,7 @@ def nearby_tde_filter(
     print(f"After Milliquas cut (<={milliquas_radius_arcsec}\"), {len(passed)} remain.")
 
     # Fetch all per-band alerts once for each surviving object
-    object_alerts_map = {a.objectId: get_object_alerts(a) for a in passed}
+    object_alerts_map = {a.objectId: babamul_get_alerts(survey=a.survey, object_id=a.objectId) for a in passed}
 
     # --- 3. g-r colour cut ---
     def _is_blue(alert: ZtfAlert | LsstAlert) -> bool:
@@ -326,7 +299,6 @@ def nearby_tde_filter(
     print(f"After rising cut, {len(passed)} remain.")
 
     return passed
-
 
 
 def filter_alerts(
@@ -361,319 +333,20 @@ def filter_alerts(
         print(f"After filtering, {len(result)} remain.")
         return result
 
-
-def _load_crossmatch_catalog(path: str) -> Table:
+def deduplicate_alerts(alerts: list[ZtfAlert | LsstAlert]) -> list[ZtfAlert | LsstAlert]:
     """
-    Load a catalog for crossmatching from a FITS file or a nested zip (LRD_Kokorev24).
-
-    COSMOS FITS: merges HDU1 (id, ra, dec) and HDU2 (zfinal, type).
-    Zip (LRD): reads the first .fits file found inside the (possibly nested) zip.
-    Returns a flat astropy Table with at least ra, dec columns.
+    deduplicate alerts by object objectId, keeping the most recent alert for each
     """
-    if path.endswith(".zip"):
-        with zipfile.ZipFile(path) as outer:
-            fits_names = [n for n in outer.namelist() if n.endswith(".fits")]
-            if fits_names:
-                return Table.read(io.BytesIO(outer.read(fits_names[0])))
-            # nested zip
-            zip_names = [n for n in outer.namelist() if n.endswith(".zip")]
-            if not zip_names:
-                raise ValueError(f"No FITS or nested zip found in {path}")
-            with zipfile.ZipFile(io.BytesIO(outer.read(zip_names[0]))) as inner:
-                fits_names = [n for n in inner.namelist() if n.endswith(".fits")]
-                if not fits_names:
-                    raise ValueError(f"No FITS file found inside nested zip in {path}")
-                return Table.read(io.BytesIO(inner.read(fits_names[0])))
-    else:
-        hdu1 = Table.read(path, hdu=1)
-        hdu2 = Table.read(path, hdu=2)
-        hdu1.meta.pop("EXTNAME", None)
-        hdu2.meta.pop("EXTNAME", None)
-        return hstack([hdu1, hdu2])
-
-
-def crossmatch_cosmos(
-    alerts: list[ZtfAlert | LsstAlert] | None = None,
-    cosmos_path: str = "",
-    radius_arcsec: float = 5.0,
-    ra: float | list[float] | None = None,
-    dec: float | list[float] | None = None,
-) -> tuple[list[ZtfAlert | LsstAlert] | list[int], pd.DataFrame]:
-    """
-    Return inputs with a spatial match in the catalog within radius_arcsec.
-
-    Supports COSMOS FITS (HDU1: id/ra/dec, HDU2: zfinal/type) and
-    LRD_Kokorev24.zip (nested zip with a FITS containing ra, dec, id, z_phot).
-
-    Can be called with alerts OR with direct ra/dec coordinates.
-
-    Parameters
-    ----------
-    alerts : list of ZtfAlert | LsstAlert, optional
-        Pre-filtered alerts.
-    cosmos_path : str
-        Path to catalog: a COSMOS FITS file or LRD_Kokorev24.zip.
-    radius_arcsec : float
-        Match radius in arcseconds. Default 5.0.
-    ra : float or list of float, optional
-        RA(s) in degrees. Used instead of alerts when provided.
-    dec : float or list of float, optional
-        Dec(s) in degrees. Used instead of alerts when provided.
-
-    Returns
-    -------
-    matched : list of ZtfAlert | LsstAlert (alert mode) or list of int (coord mode)
-    df : pd.DataFrame
-        Columns vary by catalog. Always includes sep_arcsec and all catalog
-        columns at the matched row (prefixed with cat_).
-    """
-    if alerts is None and ra is None:
-        raise ValueError("Provide either alerts or ra/dec coordinates.")
-
-    cat = _load_crossmatch_catalog(cosmos_path)
-    cat_coords = SkyCoord(ra=cat["ra"], dec=cat["dec"], unit="deg")
-    cat_cols = [c for c in cat.colnames if c not in ("ra", "dec")]
-
-    def _cat_row(i):
-        return {f"cat_{c}": cat[c][i] for c in cat_cols}
-
-    if alerts is not None:
-        input_coords = SkyCoord(
-            ra=[a.candidate.ra for a in alerts],
-            dec=[a.candidate.dec for a in alerts],
-            unit="deg",
-        )
-        idx, sep, _ = input_coords.match_to_catalog_sky(cat_coords)
-        matched = []
-        rows = []
-        for a, i, d in zip(alerts, idx, sep):
-            if d.to(u.arcsec).value <= radius_arcsec:
-                matched.append(a)
-                rows.append({
-                    "objectId_lsst": a.objectId,
-                    "ra_cat": cat["ra"][i],
-                    "dec_cat": cat["dec"][i],
-                    **_cat_row(i),
-                    "sep_arcsec": d.to(u.arcsec).value,
-                })
-        print(f"Catalog crossmatch: {len(matched)}/{len(alerts)} alerts matched within {radius_arcsec}\".")
-        return matched, pd.DataFrame(rows)
-    else:
-        ra_list = [ra] if isinstance(ra, (int, float)) else list(ra)
-        dec_list = [dec] if isinstance(dec, (int, float)) else list(dec)
-        input_coords = SkyCoord(ra=ra_list, dec=dec_list, unit="deg")
-        idx, sep, _ = input_coords.match_to_catalog_sky(cat_coords)
-        matched_indices = []
-        rows = []
-        for j, (i, d) in enumerate(zip(idx, sep)):
-            if d.to(u.arcsec).value <= radius_arcsec:
-                matched_indices.append(j)
-                rows.append({
-                    "input_idx": j,
-                    "ra_input": ra_list[j],
-                    "dec_input": dec_list[j],
-                    "ra_cat": cat["ra"][i],
-                    "dec_cat": cat["dec"][i],
-                    **_cat_row(i),
-                    "sep_arcsec": d.to(u.arcsec).value,
-                })
-        print(f"Catalog crossmatch: {len(matched_indices)}/{len(ra_list)} coordinates matched within {radius_arcsec}\".")
-        return matched_indices, pd.DataFrame(rows)
-
-
-def crossmatch_clauds_cosmos(
-    alerts: list[ZtfAlert | LsstAlert] | None = None,
-    cosmos_path: str = "",
-    radius_arcsec: float = 5.0,
-    ra: float | list[float] | None = None,
-    dec: float | list[float] | None = None,
-) -> tuple[list[ZtfAlert | LsstAlert] | list[int], pd.DataFrame]:
-    """
-    Crossmatch with the COSMOS-HSCpipe-Phosphoros catalog, keeping only pure galaxies.
-
-    Galaxy selection: isStar=False, isStarTemp=False, isCompact=False,
-    isOutsideMask=False, isClean_HSC-I=True.
-
-    Parameters
-    ----------
-    alerts : list of ZtfAlert | LsstAlert, optional
-        Pre-filtered alerts.
-    cosmos_path : str
-        Path to COSMOS-HSCpipe-Phosphoros.fits.
-    radius_arcsec : float
-        Match radius in arcseconds. Default 5.0.
-    ra : float or list of float, optional
-        RA(s) in degrees. Used instead of alerts when provided.
-    dec : float or list of float, optional
-        Dec(s) in degrees. Used instead of alerts when provided.
-
-    Returns
-    -------
-    matched : list of ZtfAlert | LsstAlert (alert mode) or list of int (coord mode)
-    df : pd.DataFrame
-        Always includes sep_arcsec and all catalog columns (prefixed with cat_).
-    """
-    if alerts is None and ra is None:
-        raise ValueError("Provide either alerts or ra/dec coordinates.")
-
-    with fits.open(cosmos_path, memmap=True) as hdul:
-        data = hdul[1].data
-        galaxy_mask = (
-            ~data["isStar"].astype(bool)
-            & ~data["isStarTemp"].astype(bool)
-            & ~data["isCompact"].astype(bool)
-            & ~data["isOutsideMask"].astype(bool)
-            & data["isClean_HSC-I"].astype(bool)
-        )
-        cat = Table(data[galaxy_mask])
-    print(f"CLAUDS-COSMOS catalog: {len(cat)} pure galaxies loaded.")
-
-    cat_coords = SkyCoord(ra=cat["RA"], dec=cat["DEC"], unit="deg")
-    cat_cols = [c for c in cat.colnames if c not in ("RA", "DEC")]
-
-    def _cat_row(i):
-        return {f"cat_{c}": cat[c][i] for c in cat_cols}
-
-    if alerts is not None:
-        input_coords = SkyCoord(
-            ra=[a.candidate.ra for a in alerts],
-            dec=[a.candidate.dec for a in alerts],
-            unit="deg",
-        )
-        idx, sep, _ = input_coords.match_to_catalog_sky(cat_coords)
-        matched = []
-        rows = []
-        for a, i, d in zip(alerts, idx, sep):
-            if d.to(u.arcsec).value <= radius_arcsec:
-                matched.append(a)
-                rows.append({
-                    "objectId_lsst": a.objectId,
-                    "ra_cat": float(cat["RA"][i]),
-                    "dec_cat": float(cat["DEC"][i]),
-                    **_cat_row(i),
-                    "sep_arcsec": d.to(u.arcsec).value,
-                })
-        print(f"CLAUDS-COSMOS crossmatch: {len(matched)}/{len(alerts)} alerts matched within {radius_arcsec}\".")
-        return matched, pd.DataFrame(rows)
-    else:
-        ra_list = [ra] if isinstance(ra, (int, float)) else list(ra)
-        dec_list = [dec] if isinstance(dec, (int, float)) else list(dec)
-        input_coords = SkyCoord(ra=ra_list, dec=dec_list, unit="deg")
-        idx, sep, _ = input_coords.match_to_catalog_sky(cat_coords)
-        matched_indices = []
-        rows = []
-        for j, (i, d) in enumerate(zip(idx, sep)):
-            if d.to(u.arcsec).value <= radius_arcsec:
-                matched_indices.append(j)
-                rows.append({
-                    "input_idx": j,
-                    "ra_input": ra_list[j],
-                    "dec_input": dec_list[j],
-                    "ra_cat": float(cat["RA"][i]),
-                    "dec_cat": float(cat["DEC"][i]),
-                    **_cat_row(i),
-                    "sep_arcsec": d.to(u.arcsec).value,
-                })
-        print(f"CLAUDS-COSMOS crossmatch: {len(matched_indices)}/{len(ra_list)} coordinates matched within {radius_arcsec}\".")
-        return matched_indices, pd.DataFrame(rows)
-
-
-def crossmatch_deep23(
-    alerts: list[ZtfAlert | LsstAlert] | None = None,
-    deep23_path: str = "",
-    radius_arcsec: float = 5.0,
-    ra: float | list[float] | None = None,
-    dec: float | list[float] | None = None,
-) -> tuple[list[ZtfAlert | LsstAlert] | list[int], pd.DataFrame]:
-    """
-    Crossmatch with the DEEP23-HSCpipe-Phosphoros catalog, keeping only pure galaxies.
-
-    Galaxy selection: isStar=False, isStarTemp=False, isCompact=False,
-    isOutsideMask=False, isClean_HSC-I=True.
-
-    Parameters
-    ----------
-    alerts : list of ZtfAlert | LsstAlert, optional
-        Pre-filtered alerts.
-    deep23_path : str
-        Path to DEEP23-HSCpipe-Phosphoros.fits.
-    radius_arcsec : float
-        Match radius in arcseconds. Default 5.0.
-    ra : float or list of float, optional
-        RA(s) in degrees. Used instead of alerts when provided.
-    dec : float or list of float, optional
-        Dec(s) in degrees. Used instead of alerts when provided.
-
-    Returns
-    -------
-    matched : list of ZtfAlert | LsstAlert (alert mode) or list of int (coord mode)
-    df : pd.DataFrame
-        Always includes sep_arcsec and all catalog columns (prefixed with cat_).
-    """
-    if alerts is None and ra is None:
-        raise ValueError("Provide either alerts or ra/dec coordinates.")
-
-    with fits.open(deep23_path, memmap=True) as hdul:
-        data = hdul[1].data
-        galaxy_mask = (
-            ~data["isStar"].astype(bool)
-            & ~data["isStarTemp"].astype(bool)
-            & ~data["isCompact"].astype(bool)
-            & ~data["isOutsideMask"].astype(bool)
-            & data["isClean_HSC-I"].astype(bool)
-        )
-        cat = Table(data[galaxy_mask])
-
-    print(f"DEEP23 catalog: {len(cat)} pure galaxies loaded.")
-
-    cat_coords = SkyCoord(ra=cat["RA"], dec=cat["DEC"], unit="deg")
-    cat_cols = [c for c in cat.colnames if c not in ("RA", "DEC")]
-
-    def _cat_row(i):
-        return {f"cat_{c}": cat[c][i] for c in cat_cols}
-
-    if alerts is not None:
-        input_coords = SkyCoord(
-            ra=[a.candidate.ra for a in alerts],
-            dec=[a.candidate.dec for a in alerts],
-            unit="deg",
-        )
-        idx, sep, _ = input_coords.match_to_catalog_sky(cat_coords)
-        matched = []
-        rows = []
-        for a, i, d in zip(alerts, idx, sep):
-            if d.to(u.arcsec).value <= radius_arcsec:
-                matched.append(a)
-                rows.append({
-                    "objectId_lsst": a.objectId,
-                    "ra_cat": float(cat["RA"][i]),
-                    "dec_cat": float(cat["DEC"][i]),
-                    **_cat_row(i),
-                    "sep_arcsec": d.to(u.arcsec).value,
-                })
-        print(f"DEEP23 crossmatch: {len(matched)}/{len(alerts)} alerts matched within {radius_arcsec}\".")
-        return matched, pd.DataFrame(rows)
-    else:
-        ra_list = [ra] if isinstance(ra, (int, float)) else list(ra)
-        dec_list = [dec] if isinstance(dec, (int, float)) else list(dec)
-        input_coords = SkyCoord(ra=ra_list, dec=dec_list, unit="deg")
-        idx, sep, _ = input_coords.match_to_catalog_sky(cat_coords)
-        matched_indices = []
-        rows = []
-        for j, (i, d) in enumerate(zip(idx, sep)):
-            if d.to(u.arcsec).value <= radius_arcsec:
-                matched_indices.append(j)
-                rows.append({
-                    "input_idx": j,
-                    "ra_input": ra_list[j],
-                    "dec_input": dec_list[j],
-                    "ra_cat": float(cat["RA"][i]),
-                    "dec_cat": float(cat["DEC"][i]),
-                    **_cat_row(i),
-                    "sep_arcsec": d.to(u.arcsec).value,
-                })
-        print(f"DEEP23 crossmatch: {len(matched_indices)}/{len(ra_list)} coordinates matched within {radius_arcsec}\".")
-        return matched_indices, pd.DataFrame(rows)
+    alerts_to_scan = {}
+    for a in alerts:
+        if (
+            a.objectId not in alerts_to_scan
+            or a.candidate.jd > alerts_to_scan[a.objectId].candidate.jd
+        ):
+            alerts_to_scan[a.objectId] = a
+    alerts_to_scan = list(alerts_to_scan.values())
+    print(f"After deduplication, {len(alerts_to_scan)} unique alerts remain.")
+    return alerts_to_scan
 
 
 def catalog_filter(
@@ -681,8 +354,8 @@ def catalog_filter(
     z_min: float = 0.2,
 ) -> dict:
     """
-    Filter crossmatched objects dict by minimum redshift across any matched catalog.
-
+    Filter crossmatched objects dict by crossmatched catalog object features.
+    
     Checks common redshift column names: z, Z_BEST, ZPHOT, zfinal, zpdf_med.
     An object passes if at least one matched catalog has a redshift >= z_min.
 
@@ -714,46 +387,17 @@ def catalog_filter(
     return result
 
 
-def clauds_filter(
-    alerts: list[ZtfAlert | LsstAlert],
-    clauds_matches: pd.DataFrame,
-    z_min: float = 0.2,
-) -> tuple[list[ZtfAlert | LsstAlert], pd.DataFrame]:
-    """
-    Filter crossmatched alerts by CLAUDS-COSMOS catalog properties.
-
-    Parameters
-    ----------
-    alerts : list of ZtfAlert | LsstAlert
-        Crossmatched alerts (output of crossmatch_clauds_cosmos).
-    clauds_matches : pd.DataFrame
-        Match table (output of crossmatch_clauds_cosmos).
-    z_min : float
-        Minimum photometric redshift (cat_ZPHOT). Default 0.2.
-
-    Returns
-    -------
-    filtered_alerts : list of ZtfAlert | LsstAlert
-    filtered_matches : pd.DataFrame
-    """
-    filtered_matches = clauds_matches[clauds_matches["cat_ZPHOT"] > z_min]
-
-    keep_ids = set(filtered_matches["objectId_lsst"])
-    filtered_alerts = [a for a in alerts if a.objectId in keep_ids]
-    print(f"After clauds_filter (z>{z_min}): {len(filtered_alerts)} alerts remain.")
-    return filtered_alerts, filtered_matches.reset_index(drop=True)
-
-
 def catalog_crossmatch(
     alerts: list[ZtfAlert | LsstAlert] | None = None,
     ra: float | list[float] | None = None,
     dec: float | list[float] | None = None,
     catalog_name: str | list[str] | None = None,
-    catalog_path: str = "data/catalogs",
+    catalog_path: str | None = None,
     radius_arcsec: float = 5.0,
 ) -> pd.DataFrame:
     """
     Crossmatch alerts or coordinates against one or all .fits catalogs in catalog_path.
+    Using a cone search with defined radius, keeping the closest match only.
 
     Parameters
     ----------
@@ -767,7 +411,7 @@ def catalog_crossmatch(
         Filename of a specific catalog to use (e.g. 'COSMOS2025_cut.fits').
         If None, crossmatches against all .fits files in catalog_path.
     catalog_path : str
-        Directory containing .fits catalogs. Default 'data/catalogs'.
+        Directory containing .fits catalogs. Defaults to data/catalogs/ at the repo root.
     radius_arcsec : float
         Match radius in arcseconds. Default 5.0.
 
@@ -779,6 +423,9 @@ def catalog_crossmatch(
     """
     if alerts is None and ra is None:
         raise ValueError("Provide either alerts or ra/dec coordinates.")
+
+    if catalog_path is None:
+        catalog_path = Path(__file__).resolve().parents[3] / "data" / "catalogs"
 
     fits_files = sorted([f for f in os.listdir(catalog_path) if f.endswith('.fits')])
     if not fits_files:
@@ -852,18 +499,3 @@ def catalog_crossmatch(
     print(f"Total: {len(result)}/{len(inputs)} inputs matched in at least one catalog.")
     return result
 
-
-def deduplicate_alerts(alerts: list[ZtfAlert | LsstAlert]) -> list[ZtfAlert | LsstAlert]:
-    """
-    deduplicate alerts by object objectId, keeping the most recent alert for each
-    """
-    alerts_to_scan = {}
-    for a in alerts:
-        if (
-            a.objectId not in alerts_to_scan
-            or a.candidate.jd > alerts_to_scan[a.objectId].candidate.jd
-        ):
-            alerts_to_scan[a.objectId] = a
-    alerts_to_scan = list(alerts_to_scan.values())
-    print(f"After deduplication, {len(alerts_to_scan)} unique alerts remain.")
-    return alerts_to_scan
