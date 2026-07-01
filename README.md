@@ -5,7 +5,7 @@ This work simulates expected rates, SEDs, and lightcurves for TDEs and other tra
 
 ### Getting started
 
-Create an environement and install packages for example:
+Create an environement and install packages. For example:
   ```bash
   git clone https://github.com/knolan10/THOR.git
   cd THOR
@@ -16,7 +16,7 @@ Create an environement and install packages for example:
   
 Some [example notebooks](docs/notebooks/) demonstrate fetching and filtering LSST alerts, and visualizing the LSST alert stream.
 
-To fetch and visualise LSST alerts for a giv.en night, run:
+To fetch and visualise LSST alerts for a given night, run:
 
 ```bash
  `python src/thor/summarize_rubin_alerts.py 07-01-2026 07-02-2026`
@@ -27,13 +27,13 @@ This uses the Babamul alert broker to fetch alerts, which requires user credenti
 
 ### Data
 
-Large data files (catalogs, simulation results, alert stream outputs) are not tracked in this repository. 
+Large data files (catalogs, simulation results, alert stream outputs) are not tracked in this repository. They are all saved locally in `THOR/data`.
 
-In 'data/catalogs' we keep all catalogs used for crossmatching. These catalogs are recorded in [`catalogs_catalog`](src/thor/alert_stream/catalogs_catalog.py). Most catalogs used have had basic quality cuts to select only galaxies, and have been reduced to selected columns.
+In `data/catalogs` we keep all catalogs used for crossmatching. These catalogs are recorded in [`catalogs_catalog`](src/thor/alert_stream/catalogs_catalog.py). Most catalogs used have had basic quality cuts to select only galaxies, and have been reduced to selected columns.
 
-In 'data/lsst_alert_download' we save LSST alerts fetched with the [Babamul alert broker](https://babamul.caltech.edu/).
+In `data/lsst_alert_download` we save LSST alerts fetched with the [Babamul alert broker](https://babamul.caltech.edu/).
 
-'data/' also contains the [Elassticc data](https://portal.nersc.gov/cfs/lsst/DESC_TD_PUBLIC/ELASTICC/ELASTICC2_TRAINING_SAMPLE_2/
+`data/` also contains the [Elassticc data](https://portal.nersc.gov/cfs/lsst/DESC_TD_PUBLIC/ELASTICC/ELASTICC2_TRAINING_SAMPLE_2/
 ) used for contaminant transients for filter development. It contains the [rubin pointing database](https://s3df.slac.stanford.edu/data/rubin/sim-data/sims_featureScheduler_runs5.3/baseline/) used to simulate LSST lightcurves.
 
 
