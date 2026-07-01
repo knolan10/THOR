@@ -1,8 +1,29 @@
 ## THOR (Transients at High Observed Redshifts) identifies distant Tidal Disruption Events (TDEs) in [LSST data](https://rubinobservatory.org/).
 
-In [`simulations`](src/thor/simulations/) we simulate expectations of transients observed by LSST at high (z>1) redshifts. We develop filters to select for these distant objects.
+This work simulates expected rates, SEDs, and lightcurves for TDEs and other transients across redshifts. It filters the LSST alert stream for high redshift objects, through catalog crossmatching and photometric selection techniques.
 
-In [`alert_stream`](src/thor/alert_stream/) we develop a pipeline to filter real LSST alerts, using the alert broker [Babamul/Boom](https://www.ztf.caltech.edu/ztf-boom-babamul.html#:~:text=A%20multi%2Dsurvey%20data%20archive%20and%20alert%20broker%20(Babamul)%20combining%20data%20from&text=The%20source%20code%20and%20documentation%20are%20open%20source%20and%20hosted%20on%20Github.). This includes crossmatches with high-redshift galaxies from catalogs, as well as searches for hostless sources. 
+
+### Getting started
+
+Create an environement and install packages for example:
+  ```bash
+  git clone https://github.com/knolan10/THOR.git
+  cd THOR
+  uv venv --python 3.12 && source .venv/bin/activate
+  uv pip install -r requirementstxt
+  uv pip install -e .
+  ```
+  
+Some [example notebooks](docs/notebooks/) demonstrate fetching and filtering LSST alerts, and visualizing the LSST alert stream.
+
+To fetch and visualise LSST alerts for a giv.en night, run:
+
+```bash
+ `python src/thor/summarize_rubin_alerts.py 07-01-2026 07-02-2026`
+ ```
+
+This uses the Babamul alert broker to fetch alerts, which requires user credentials stored in a .env file locally. Omit dates to default to the previous night. The generated skymap is saved to `data/plots/`
+
 
 ### Data
 
@@ -25,3 +46,5 @@ In 'data/lsst_alert_download' we save LSST alerts fetched with the [Babamul aler
 For questions [Report an issue](https://github.com/knolan10/THOR/issues) or reach out at kinolan@unc.edu.
 
 This project was automatically generated using the LINCC-Frameworks [python-project-template](https://github.com/lincc-frameworks/python-project-template).
+
+

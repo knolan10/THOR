@@ -5,10 +5,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "alert_stream"))
-
-import filter_functions
-from rubin_stats_functions import load_alerts
+from thor.utils.filter_functions import filter_alerts, generic_filter, tde_filter
+from thor.utils.fetch_alerts import load_alerts
 
 
 def main():
@@ -35,15 +33,15 @@ def main():
     print(f"Loaded {len(loaded_alerts):,} alerts from {len(alert_files)} file(s).")
 
     # ── Generic cuts (drb, rock, star, near_brightstar, stationary, PSF) ─────
-    filtered_alerts = filter_functions.filter_alerts(
+    filtered_alerts = filter_alerts(
         loaded_alerts,
-        filter_functions.generic_filter,
+        generic_filter,
     )
 
     # ── TDE-specific cuts (>=5 detections, no Milliquas match, rising) ────────
-    tde_candidates = filter_functions.filter_alerts(
+    tde_candidates = filter_alerts(
         filtered_alerts,
-        filter_functions.tde_filter,
+        tde_filter,
     )
 
     # ── Save results ──────────────────────────────────────────────────────────
