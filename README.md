@@ -24,12 +24,20 @@ To fetch and visualise LSST alerts for a given night, run:
 
 This uses the Babamul alert broker to fetch alerts, which requires user credentials stored in a .env file locally. Omit dates to default to the previous night. The generated skymap is saved to `data/plots/`
 
+To fetch alerts, crossmatch against available catalogs, and save candidates, run:
+
+```bash
+python src/thor/crossmatch_alerts.py --start 06-28-2026 --end 06-30-2026 --additional_filtering tde_filter --scan
+```
+
+If there are any matches, the crossmatch result is saved to `data/lsst_alert_download/crossmatch_candidates_{timestamp}.json`. To apply additional TDE-specific filtering, pass `--additional_filtering tde_filter`. Add flag `--save` to save raw alerts to `data/lsst_alert_download/raw_files/`, and flag `--save_results` in order to save the crossmatch details locally to `data/lsst_alert_download/`. A summary of results will be printed in command line, but the --scan flag can also be included to open a temp jupyter notebook in browser and use Babamul's scanning tool.
+
 
 ### Data
 
 Large data files (catalogs, simulation results, alert stream outputs) are not tracked in this repository. They are all saved locally in `THOR/data`.
 
-In `data/catalogs` we keep all catalogs used for crossmatching. These catalogs are recorded in [`catalogs_catalog`](src/thor/alert_stream/catalogs_catalog.py). Most catalogs used have had basic quality cuts to select only galaxies, and have been reduced to selected columns.
+In `data/catalogs` we keep all catalogs used for crossmatching. These catalogs are recorded in [`catalogs_catalog`](src/thor/catalogs_catalog.py). Most catalogs used have had basic quality cuts to select only galaxies, and have been reduced to selected columns.
 
 In `data/lsst_alert_download` we save LSST alerts fetched with the [Babamul alert broker](https://babamul.caltech.edu/).
 

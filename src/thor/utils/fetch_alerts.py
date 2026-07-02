@@ -11,13 +11,16 @@ from babamul import LsstAlert, ZtfAlert
 from pydantic import ValidationError
 
 _LIST_FIELDS = frozenset(("prv_candidates", "fp_hists"))
-_FLOAT_SUFFIXES = ("chi2", "rate", "rate_error", "dt", "jd", "mag", "err")
+_FLOAT_SUFFIXES = ("chi2", "rate", "rate_error", "dt", "jd", "mag", "err", "Err", "flux", "Flux")
+# Defaults injected for required fields added to the babamul schema after old alerts were saved.
+_MISSING_BOOL_DEFAULTS = {"isNegative": False}
 
 
 def _coerce_alert(obj):
     """Recursively fix API nulls that babamul models don't allow:
     - None list fields → []
     - None float fields (by name heuristic) → nan
+    - Missing required bool fields (schema additions) → default value
     """
     if isinstance(obj, list):
         return [_coerce_alert(i) for i in obj]
@@ -31,8 +34,39 @@ def _coerce_alert(obj):
             out[k] = float("nan")
         else:
             out[k] = _coerce_alert(v)
+    for field, default in _MISSING_BOOL_DEFAULTS.items():
+        if field not in out:
+            out[field] = default
     return out
 
+
+# ── Monkey-patch babamul.api.get_object to coerce nulls before model validation ──
+# babamul's lazy photometry fetch calls get_object internally. Some LSST alerts
+# return null for fields like psfFluxErr that the model requires to be floats.
+# Wrapping get_object with _coerce_alert fixes these the same way we fix saved alerts.
+import babamul.api as _babamul_api
+
+_orig_get_object = _babamul_api.get_object
+
+def _patched_get_object(survey, object_id):
+    import base64 as _base64
+    from babamul import LsstAlert as _LsstAlert, ZtfAlert as _ZtfAlert
+    from babamul.api import _request, get_args, Survey
+    response = _request("GET", f"/surveys/{survey}/objects/{object_id}")
+    data = response.get("data", response)
+    for key in ["cutoutScience", "cutoutTemplate", "cutoutDifference"]:
+        if data.get(key) and isinstance(data[key], str):
+            data[key] = _base64.b64decode(data[key])
+    data = _coerce_alert(data)
+    if survey == "ZTF":
+        return _ZtfAlert.model_validate(data)
+    elif survey == "LSST":
+        return _LsstAlert.model_validate(data)
+    else:
+        valid_surveys = ", ".join(get_args(Survey))
+        raise ValueError(f"Survey {survey} is not supported, must be one of: {valid_surveys}")
+
+_babamul_api.get_object = _patched_get_object
 
 # ── Alert fetching ─────────────────────────────────────────────────────────────
 
@@ -330,32 +364,44 @@ def load_objects(path):
     return ids
 
 
-def fetch_latest_alerts(object_ids, survey="LSST"):
+def fetch_latest_alerts(object_ids, survey="LSST", save=True, verbose=True):
     """
-    Fetch the most recent alert for each object ID.
+    Fetch the current object record for each object ID using a single API call
+    per object (get_object), which is much faster than pulling full alert history.
 
     Parameters
     ----------
     object_ids : list of str
     survey : str
         "LSST" or "ZTF". Default "LSST".
+    save : bool
+        If True (default), save the fetched alerts to
+        data/lsst_alert_download/raw_files/latest_alerts_{survey}.json.gz.
+    verbose : bool
+        If True (default), print progress per object.
 
     Returns
     -------
     list of ZtfAlert | LsstAlert
-        One alert per object ID (the most recent by JD/MJD).
+        One alert per successfully fetched object ID.
     """
     latest = []
+    failed = []
     for oid in object_ids:
-        alerts = babamul_get_alerts(survey=survey, object_id=oid)
-        if not alerts:
-            continue
-        most_recent = max(
-            alerts,
-            key=lambda a: a.candidate.jd if hasattr(a.candidate, "jd") else a.candidate.midpointMjdTai,
-        )
-        latest.append(most_recent)
-    print(f"Fetched latest alert for {len(latest):,}/{len(object_ids):,} objects.")
+        if verbose:
+            print(f"Fetching {oid}...")
+        try:
+            alert = _babamul_api.get_object(survey, oid)
+            latest.append(alert)
+        except Exception as e:
+            failed.append(oid)
+            if verbose:
+                print(f"  Failed for {oid}: {e}")
+    print(f"Fetched {len(latest):,}/{len(object_ids):,} objects ({len(failed):,} failed).")
+    if save and latest:
+        _repo_root = Path(__file__).resolve().parents[3]
+        out_path = _repo_root / "data" / "lsst_alert_download" / "raw_files" / f"latest_alerts_{survey}.json.gz"
+        save_alerts(latest, out_path)
     return latest
 
 
@@ -383,7 +429,16 @@ def load_alerts(path, survey="LSST"):
         data = json.load(f, object_hook=_object_hook)
     print(f"Loaded {len(data):,} alerts from {path}.")
 
-    return [model.model_validate(_coerce_alert(a)) for a in data]
+    alerts = [model.model_validate(_coerce_alert(a)) for a in data]
+    # The main alerts API doesn't return photometry history inline — those fields
+    # are fetched lazily by babamul when show() is called. _coerce_alert converts
+    # the None values to [] so pydantic accepts them, but that tricks babamul into
+    # thinking photometry was already fetched. Reset to None to re-enable lazy fetch.
+    for alert in alerts:
+        if not alert.prv_candidates and not alert.fp_hists:
+            alert.prv_candidates = None
+            alert.fp_hists = None
+    return alerts
 
 
 def combine_alert_files(input_dir, output_path, pattern="*.json.gz", input_files=None, delete_raw=False):
