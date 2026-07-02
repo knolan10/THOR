@@ -19,7 +19,7 @@ Some [example notebooks](docs/notebooks/) demonstrate fetching and filtering LSS
 To fetch and visualise LSST alerts for a given night, run:
 
 ```bash
- `python src/thor/summarize_rubin_alerts.py 07-01-2026 07-02-2026`
+ python src/thor/summarize_rubin_alerts.py 07-01-2026 07-02-2026
  ```
 
 This uses the Babamul alert broker to fetch alerts, which requires user credentials stored in a .env file locally. Omit dates to default to the previous night. The generated skymap is saved to `data/plots/`
@@ -27,10 +27,10 @@ This uses the Babamul alert broker to fetch alerts, which requires user credenti
 To fetch alerts, crossmatch against available catalogs, and save candidates, run:
 
 ```bash
-python src/thor/crossmatch_alerts.py --start 06-28-2026 --end 06-30-2026 --additional_filtering tde_filter --scan
+python src/thor/crossmatch_alerts.py --start 06-28-2026 --end 06-30-2026 --additional_filtering tde_filter
 ```
 
-If there are any matches, the crossmatch result is saved to `data/lsst_alert_download/crossmatch_candidates_{timestamp}.json`. To apply additional TDE-specific filtering, pass `--additional_filtering tde_filter`. Add flag `--save` to save raw alerts to `data/lsst_alert_download/raw_files/`, and flag `--save_results` in order to save the crossmatch details locally to `data/lsst_alert_download/`. A summary of results will be printed in command line, but the --scan flag can also be included to open a temp jupyter notebook in browser and use Babamul's scanning tool.
+To apply additional TDE-specific filtering, pass `--additional_filtering tde_filter`. Add flag `--save_raw_alerts` to save raw alerts to `data/lsst_alert_download/raw_files/`, and flag `--save_results` in order to save the crossmatch details locally to `data/lsst_alert_download/`. A summary of results will be printed in command line, but the `--scan` flag can also be included to open a temp jupyter notebook in browser and use Babamul's scanning tool.
 
 
 ### Data
