@@ -121,7 +121,7 @@ def main():
         help="Optional additional filter to apply after crossmatch (default: none).",
     )
     parser.add_argument(
-        "--save",
+        "--save_raw_alerts",
         action="store_true",
         help="Save fetched alerts to data/lsst_alert_download/raw_files/ (default: off).",
     )
@@ -147,7 +147,7 @@ def main():
         is_star=False,
         is_near_brightstar=False,
         is_stationary=True,
-        save=args.save,
+        save=args.save_raw_alerts,
     )
     print(f"Loaded {len(loaded_alerts):,} alerts.")
 
