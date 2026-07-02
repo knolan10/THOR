@@ -1,5 +1,7 @@
 # data (catalogs, simulations, rubin alerts)
 data/
+docs/notebooks/tidal_disruption_event/
+docs/notebooks/redback_inference
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
