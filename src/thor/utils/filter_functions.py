@@ -394,10 +394,12 @@ def catalog_crossmatch(
     catalog_name: str | list[str] | None = None,
     catalog_path: str | None = None,
     radius_arcsec: float = 5.0,
-) -> pd.DataFrame:
+    method: str = "conesearch",
+    priors: dict | None = None,
+    likes: dict | None = None,
+):
     """
     Crossmatch alerts or coordinates against one or all .fits catalogs in catalog_path.
-    Using a cone search with defined radius, keeping the closest match only.
 
     Parameters
     ----------
@@ -407,27 +409,37 @@ def catalog_crossmatch(
         RA(s) in degrees. Used instead of alerts when provided.
     dec : float or list of float, optional
         Dec(s) in degrees. Used instead of alerts when provided.
-    catalog_name : str or None
-        Filename of a specific catalog to use (e.g. 'COSMOS2025_cut.fits').
+    catalog_name : str or list[str] or None
+        Filename(s) of specific catalog(s) to use (e.g. 'COSMOS2025_cut.fits').
         If None, crossmatches against all .fits files in catalog_path.
-    catalog_path : str
+    catalog_path : str or Path, optional
         Directory containing .fits catalogs. Defaults to data/catalogs/ at the repo root.
     radius_arcsec : float
-        Match radius in arcseconds. Default 5.0.
+        Match radius in arcseconds (conesearch only). Default 5.0.
+    method : str
+        'conesearch' (default) or 'prost'. conesearch keeps the closest match per
+        catalog; prost runs full probabilistic host association via astro_prost.
+    priors : dict, optional
+        Prior distributions for prost (e.g. {"offset": uniform(...)}). If None,
+        defaults to offset-only with uniform(0, 10) prior.
+    likes : dict, optional
+        Likelihood functions for prost (e.g. {"offset": gamma(...)}). If None,
+        defaults to gamma(a=0.75) offset likelihood.
 
     Returns
     -------
-    df : pd.DataFrame
-        One row per input with at least one catalog match. Columns: LSST_objectID,
-        then one bool column per catalog named by catalog stem.
+    For method='conesearch': dict keyed by objectId (or integer index), values are
+        dicts with per-catalog row data.
+    For method='prost': pd.DataFrame returned directly by associate_sample.
     """
     if alerts is None and ra is None:
         raise ValueError("Provide either alerts or ra/dec coordinates.")
 
     if catalog_path is None:
         catalog_path = Path(__file__).resolve().parents[3] / "data" / "catalogs"
+    catalog_path = Path(catalog_path)
 
-    fits_files = sorted([f for f in os.listdir(catalog_path) if f.endswith('.fits')])
+    fits_files = sorted(f for f in os.listdir(catalog_path) if f.endswith('.fits'))
     if not fits_files:
         raise FileNotFoundError(f"No .fits files found in {catalog_path}")
 
@@ -435,27 +447,38 @@ def catalog_crossmatch(
         fits_files = [catalog_name] if isinstance(catalog_name, str) else list(catalog_name)
 
     if alerts is not None:
-        input_coords = SkyCoord(
-            ra=[a.candidate.ra for a in alerts],
-            dec=[a.candidate.dec for a in alerts],
-            unit="deg",
-        )
+        ra_list  = [a.candidate.ra  for a in alerts]
+        dec_list = [a.candidate.dec for a in alerts]
+        name_list = [a.objectId for a in alerts]
     else:
-        ra_list = [ra] if isinstance(ra, (int, float)) else list(ra)
+        ra_list  = [ra]  if isinstance(ra,  (int, float)) else list(ra)
         dec_list = [dec] if isinstance(dec, (int, float)) else list(dec)
-        input_coords = SkyCoord(ra=ra_list, dec=dec_list, unit="deg")
+        name_list = [str(i) for i in range(len(ra_list))]
 
-    # stem -> (matched bool array, catalog row dicts)
+    if method == "prost":
+        return _crossmatch_prost(
+            ra_list, dec_list, name_list, fits_files, catalog_path, priors, likes
+        )
+
+    # --- conesearch (original behaviour) ---
+    input_coords = SkyCoord(ra=ra_list, dec=dec_list, unit="deg")
+
+    def _safe_val(v):
+        import numpy.ma as ma
+        if isinstance(v, ma.core.MaskedConstant):
+            return None
+        if hasattr(v, 'item'):
+            return v.item()
+        return v
+
     catalog_results = {}
-
     for fname in fits_files:
         stem = fname.replace('.fits', '')
-        path = os.path.join(catalog_path, fname)
-        cat = Table.read(path)
+        cat = Table.read(catalog_path / fname)
         names = [n for n in cat.colnames if len(cat[n].shape) <= 1]
         cat = cat[names]
 
-        ra_col = next((c for c in cat.colnames if c.lower() == 'ra'), None)
+        ra_col  = next((c for c in cat.colnames if c.lower() == 'ra'),  None)
         dec_col = next((c for c in cat.colnames if c.lower() == 'dec'), None)
         if ra_col is None or dec_col is None:
             print(f"Skipping {fname}: no ra/dec columns found.")
@@ -466,15 +489,6 @@ def catalog_crossmatch(
         sep_arcsec = sep.to(u.arcsec).value
         within = sep_arcsec <= radius_arcsec
 
-        def _safe_val(v):
-            import numpy.ma as ma
-            if isinstance(v, ma.core.MaskedConstant):
-                return None
-            if hasattr(v, 'item'):
-                return v.item()
-            return v
-
-        # pre-build row dicts for matched entries
         row_dicts = []
         for j, (i, matched) in enumerate(zip(idx, within)):
             if matched:
@@ -498,4 +512,84 @@ def catalog_crossmatch(
 
     print(f"Total: {len(result)}/{len(inputs)} inputs matched in at least one catalog.")
     return result
+
+
+# Prost catalog keys are cached across calls so FITS files are only loaded once.
+_PROST_REGISTERED: set[str] = set()
+
+_Z_COL_CANDIDATES = ("z", "z_phot", "zphot", "photoz", "z_best", "redshift")
+_ZSTD_COL_CANDIDATES = ("z_err", "z_phot_err", "zphot_err", "ez_best", "redshift_err")
+
+
+def _fits_stem_to_prost_key(fname: str) -> str:
+    """ASTRODEEP_ABELL2744_cut.fits -> astrodeepabell2744 (matches prost's sanitize_input)"""
+    import re
+    stem = fname.replace('.fits', '').replace('_cut', '')
+    return re.sub(r'[_\-\s]', '', stem).lower()
+
+
+def _crossmatch_prost(ra_list, dec_list, name_list, fits_files, catalog_path, priors, likes):
+    from scipy.stats import gamma, uniform
+    from thor.utils.prost_catalogs import register_local_catalog
+    from astro_prost import associate_sample
+
+    prost_keys = []
+    for fname in fits_files:
+        key = _fits_stem_to_prost_key(fname)
+        if key not in _PROST_REGISTERED:
+            df = Table.read(catalog_path / fname).to_pandas()
+            cols_lower = {c.lower(): c for c in df.columns}
+
+            z_col = next((cols_lower[c] for c in _Z_COL_CANDIDATES if c in cols_lower), None)
+            if z_col is None:
+                print(f"Skipping {fname} for prost: no redshift column found.")
+                continue
+
+            z_std_col = next((cols_lower[c] for c in _ZSTD_COL_CANDIDATES if c in cols_lower), None)
+
+            # ensure required columns exist
+            if 'id' not in cols_lower:
+                df = df.reset_index(drop=True)
+                df.insert(0, 'id', df.index.astype(str))
+
+            register_local_catalog(key, df, catalog_label=fname, z_col=z_col, z_std_col=z_std_col)
+            _PROST_REGISTERED.add(key)
+            print(f"Registered {fname} as prost catalog '{key}' (z={z_col}, z_std={z_std_col}).")
+
+        prost_keys.append(key)
+
+    if not prost_keys:
+        raise ValueError("No catalogs could be registered for prost (missing redshift columns?).")
+
+    if priors is None:
+        priors = {"offset": uniform(loc=0, scale=10)}
+    if likes is None:
+        likes = {"offset": gamma(a=0.75)}
+
+    transient_catalog = pd.DataFrame({
+        'name': name_list,
+        'ra':   ra_list,
+        'dec':  dec_list,
+    })
+
+    results = associate_sample(
+        transient_catalog,
+        priors=priors,
+        likes=likes,
+        catalogs=prost_keys,
+        name_col='name',
+        coord_cols=('ra', 'dec'),
+        save=False,
+    )
+
+    confident = results[results['host_total_posterior'] > 0.3]
+    print(f"\nProst: {len(confident)}/{len(results)} transients with host_total_posterior > 0.3:")
+    for _, row in confident.iterrows():
+        print(
+            f"  {row['name']}  ->  host {row['host_objID']}  "
+            f"(cat={row['best_cat']}, posterior={row['host_total_posterior']:.3f}, "
+            f"ra={row['host_ra']:.5f}, dec={row['host_dec']:.5f})"
+        )
+
+    return results
 

@@ -39,6 +39,7 @@ import astropy.units as u
 from astropy.coordinates import SkyCoord
 from scipy.stats import norm
 
+import astro_prost.associate as _prost_associate
 from astro_prost.helpers import (
     GalaxyCatalog,
     build_galaxy_array,
@@ -46,6 +47,7 @@ from astro_prost.helpers import (
     SIZE_FLOOR,
     SIGMA_SIZE_FLOOR,
     REDSHIFT_FLOOR,
+    sanitize_input,
 )
 
 # ---- Runtime patch so custom catalogs survive GalaxyCatalog.__init__ --------
@@ -264,10 +266,15 @@ def register_local_catalog(
     z_std_col : str or None
         Column name for redshift uncertainty. If None, uses ``Z_STD_FRAC * z``.
     """
-    _CUSTOM_CATALOGS[name] = make_local_catalog_fn(
+    # prost's sanitize_input() strips underscores/hyphens/spaces before any
+    # lookup, so we must store under the sanitized key to match what get_catalogs()
+    # and GalaxyCatalog will actually query.
+    key = sanitize_input(name)
+    _CUSTOM_CATALOGS[key] = make_local_catalog_fn(
         df,
         catalog_label=catalog_label or name,
         z_col=z_col,
         z_std_col=z_std_col,
     )
+    _prost_associate.DEFAULT_RELEASES.setdefault(key, "local")
     _patch_galaxy_catalog_init()

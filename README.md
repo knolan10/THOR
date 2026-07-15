@@ -29,10 +29,20 @@ This uses the Babamul alert broker to fetch alerts, which requires user credenti
 To fetch alerts, crossmatch against available catalogs, and save candidates, run:
 
 ```bash
-python src/thor/crossmatch_alerts.py --start 06-28-2026 --end 06-30-2026 --additional_filtering tde_filter --scan
+python src/thor/crossmatch_alerts.py --start 06-28-2026 --end 06-30-2026
 ```
 
 To apply additional TDE-specific filtering, pass `--additional_filtering tde_filter`. Add flag `--save_raw_alerts` to save raw alerts to `data/lsst_alert_download/raw_files/`, and flag `--save_results` in order to save the crossmatch details locally to `data/lsst_alert_download/`. A summary of results will be printed in command line, but the `--scan` flag can also be included to open a temp jupyter notebook in browser and use Babamul's scanning tool.
+
+Pass `--method prost` to use probabilistic host association via [astro_prost](https://github.com/alexandergagliano/galaxy-association) instead of cone search. For efficiency, this will run a 10 arcsec consearch first to remove alerts with no nearby hosts.
+
+```bash
+python src/thor/crossmatch_alerts.py --start 06-28-2026 --end 06-30-2026 --method prost --additional_filtering tde_filter --scan
+```
+
+Results are saved as a `.csv` (one row per transient) rather than `.json`. Transients with a host posterior > 0.3 are printed to the command line.
+
+The script currently uses galaxy offset as the default scoring property, with a `uniform(0, 10)` prior and `gamma(a=0.75)` likelihood. Redshift information is loaded from catalogs where available and can be included in scoring via custom priors. For more flexibility, see the Prost section of the [crossmatching notebook](docs/notebooks/Example_LSST_Catalog_Crossmatching.ipynb) or the [astro_prost documentation](https://github.com/alexandergagliano/galaxy-association) for the full list of supported properties and association options.
 
 
 ### Data
