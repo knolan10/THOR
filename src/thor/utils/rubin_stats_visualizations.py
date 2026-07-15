@@ -201,7 +201,109 @@ def _save_plot(fig, title=None):
     print(f"Saved plot to {path}")
 
 
-def plot_skymap(alerts, title=None, heatmap=False, bin_size_deg=3.5, plot_ddf=False, save=False):
+_CAT_COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+]
+
+
+_OVERLAP_DEG = 5.0        # catalogs within this separation (deg) are considered overlapping
+_STAR_OFFSET_RAD = np.radians(2.5)  # horizontal nudge per slot in Mollweide x
+
+
+def _draw_catalog_footprints(ax, plot_catalogs, catalog_path=None, mollweide=True):
+    """Overlay catalog sky-coverage footprints as filled polygons or stars.
+
+    Parameters
+    ----------
+    plot_catalogs : True or list of str
+        True to draw all catalogs in catalogs_catalog.py, or a list of
+        catalog filenames (same format accepted by catalog_crossmatch).
+    catalog_path : str or Path, optional
+        If provided, restrict to catalogs whose .fits file exists there.
+    """
+    from thor.catalogs_catalog import catalogs as _catalog_meta
+
+    names = list(_catalog_meta.keys()) if plot_catalogs is True else list(plot_catalogs)
+
+    if catalog_path is not None:
+        available = {f.name for f in Path(catalog_path).glob("*.fits")}
+        names = [n for n in names if n in available]
+
+    rect_entries = []  # (ra_min, ra_max, dec_min, dec_max, color, label)
+    star_entries = []  # (cx_deg, cy_deg, color, label)
+
+    for i, name in enumerate(names):
+        if name not in _catalog_meta:
+            continue
+        meta = _catalog_meta[name]
+        ra_min, ra_max = meta["ra_range"]
+        dec_min, dec_max = meta["dec_range"]
+        color = _CAT_COLORS[i % len(_CAT_COLORS)]
+        label = name.replace("_cut.fits", "")
+        area_deg2 = (ra_max - ra_min) * (dec_max - dec_min)
+        if area_deg2 < 5:
+            star_entries.append(((ra_min + ra_max) / 2, (dec_min + dec_max) / 2, color, label))
+        else:
+            rect_entries.append((ra_min, ra_max, dec_min, dec_max, color, label))
+
+    # draw rectangles
+    for ra_min, ra_max, dec_min, dec_max, color, label in rect_entries:
+        n = 50
+        poly_ra = np.concatenate([
+            np.linspace(ra_min, ra_max, n), np.full(n, ra_max),
+            np.linspace(ra_max, ra_min, n), np.full(n, ra_min),
+        ])
+        poly_dec = np.concatenate([
+            np.full(n, dec_max), np.linspace(dec_max, dec_min, n),
+            np.full(n, dec_min), np.linspace(dec_min, dec_max, n),
+        ])
+        if mollweide:
+            x = np.radians(poly_ra)
+            x = np.where(x > np.pi, x - 2 * np.pi, x)
+            x = -x
+            y = np.radians(poly_dec)
+        else:
+            x, y = poly_ra, poly_dec
+        ax.fill(x, y, alpha=0.25, color=color, zorder=2)
+        ax.plot(x, y, alpha=0.8, color=color, linewidth=1.5, label=label, zorder=3)
+
+    # group overlapping stars and nudge them apart
+    used = [False] * len(star_entries)
+    groups = []
+    for i in range(len(star_entries)):
+        if used[i]:
+            continue
+        group = [i]
+        used[i] = True
+        ra_i, dec_i = star_entries[i][:2]
+        for j in range(i + 1, len(star_entries)):
+            if used[j]:
+                continue
+            ra_j, dec_j = star_entries[j][:2]
+            if abs(ra_i - ra_j) < _OVERLAP_DEG and abs(dec_i - dec_j) < _OVERLAP_DEG:
+                group.append(j)
+                used[j] = True
+        groups.append(group)
+
+    for group in groups:
+        n = len(group)
+        for k, idx in enumerate(group):
+            cx_deg, cy_deg, color, label = star_entries[idx]
+            if mollweide:
+                cx_rad = np.radians(cx_deg)
+                cx_rad = cx_rad - 2 * np.pi if cx_rad > np.pi else cx_rad
+                cx = -cx_rad + (k - (n - 1) / 2) * _STAR_OFFSET_RAD
+                cy = np.radians(cy_deg)
+            else:
+                cx = cx_deg + (k - (n - 1) / 2) * np.degrees(_STAR_OFFSET_RAD)
+                cy = cy_deg
+            ax.scatter(cx, cy, s=150, marker="*", color=color, label=label,
+                       alpha=0.9, zorder=4, linewidths=0)
+
+
+def plot_skymap(alerts=None, title=None, heatmap=False, bin_size_deg=3.5,
+                plot_ddf=False, plot_catalogs=False, catalog_path=None, save=False):
     """
     Full-sky Mollweide projection with zoomed footprint inset and band legend.
     Colored by filter, sized by brightness (larger = brighter).
@@ -213,48 +315,67 @@ def plot_skymap(alerts, title=None, heatmap=False, bin_size_deg=3.5, plot_ddf=Fa
 
     If plot_ddf=True, DDF field centres are overlaid as labelled open circles
     on both the Mollweide panel and the zoom inset.
+
+    If plot_catalogs is True, all catalogs from catalogs_catalog.py are drawn
+    as filled footprint polygons.  Pass a list of catalog filenames to restrict
+    to specific catalogs (same names accepted by catalog_crossmatch).
+    catalog_path is used to filter to catalogs that actually exist on disk.
+
+    alerts may be None when plot_catalogs or plot_ddf is set.
     """
     def band_str(a):
         b = a.candidate.band
         return (b.value if hasattr(b, "value") else str(b)) if b is not None else "?"
 
-    if not alerts:
-        print("No alerts to plot.")
+    if alerts is None and not plot_catalogs and not plot_ddf:
+        print("Nothing to plot.")
         return
 
-    all_ras  = np.array([a.candidate.ra  for a in alerts])
-    all_decs = np.array([a.candidate.dec for a in alerts])
-
-    if heatmap:
+    # ── heatmap / catalog-only mode ──────────────────────────────────────────
+    if heatmap or alerts is None:
         fig = plt.figure(figsize=(14, 7), facecolor="#0f0f1a")
         ax_sky = fig.add_subplot(111, projection="mollweide")
         ax_sky.set_facecolor("#0f0f1a")
 
-        # bin edges in degrees
-        ra_bins  = np.arange(0,   360 + bin_size_deg, bin_size_deg)
-        dec_bins = np.arange(-90, 90  + bin_size_deg, bin_size_deg)
+        if alerts:
+            all_ras  = np.array([a.candidate.ra  for a in alerts])
+            all_decs = np.array([a.candidate.dec for a in alerts])
 
-        counts, _, _ = np.histogram2d(all_ras, all_decs, bins=[ra_bins, dec_bins])
+            # bin edges in degrees
+            ra_bins  = np.arange(0,   360 + bin_size_deg, bin_size_deg)
+            dec_bins = np.arange(-90, 90  + bin_size_deg, bin_size_deg)
 
-        # convert bin edges to radians for Mollweide, wrap RA to [-pi, pi]
-        ra_edge_rad  = np.radians(ra_bins)
-        ra_edge_rad  = np.where(ra_edge_rad > np.pi, ra_edge_rad - 2 * np.pi, ra_edge_rad)
-        dec_edge_rad = np.radians(dec_bins)
+            counts, _, _ = np.histogram2d(all_ras, all_decs, bins=[ra_bins, dec_bins])
 
-        ra_edge_grid, dec_edge_grid = np.meshgrid(ra_edge_rad, dec_edge_rad, indexing="ij")
+            # convert bin edges to radians for Mollweide, wrap RA to [-pi, pi]
+            ra_edge_rad  = np.radians(ra_bins)
+            ra_edge_rad  = np.where(ra_edge_rad > np.pi, ra_edge_rad - 2 * np.pi, ra_edge_rad)
+            dec_edge_rad = np.radians(dec_bins)
 
-        # mask zero-count cells so they stay transparent
-        plot_counts = np.ma.masked_where(counts == 0, counts)
+            ra_edge_grid, dec_edge_grid = np.meshgrid(ra_edge_rad, dec_edge_rad, indexing="ij")
 
-        sc = ax_sky.pcolormesh(
-            -ra_edge_grid, dec_edge_grid, plot_counts,
-            cmap="YlOrRd", alpha=0.85, shading="flat",
-            norm=mcolors.LogNorm(vmin=1, vmax=plot_counts.max()),
-        )
-        cbar = fig.colorbar(sc, ax=ax_sky, orientation="horizontal",
-                            pad=0.05, fraction=0.04, aspect=30)
-        cbar.set_label("alerts per bin", color="#aaaaaa", fontsize=23)
-        cbar.ax.tick_params(colors="#aaaaaa", labelsize=20)
+            # mask zero-count cells so they stay transparent
+            plot_counts = np.ma.masked_where(counts == 0, counts)
+
+            sc = ax_sky.pcolormesh(
+                -ra_edge_grid, dec_edge_grid, plot_counts,
+                cmap="YlOrRd", alpha=0.85, shading="flat",
+                norm=mcolors.LogNorm(vmin=1, vmax=plot_counts.max()),
+            )
+            cbar = fig.colorbar(sc, ax=ax_sky, orientation="horizontal",
+                                pad=0.05, fraction=0.04, aspect=30)
+            cbar.set_label("alerts per bin", color="#aaaaaa", fontsize=23)
+            cbar.ax.tick_params(colors="#aaaaaa", labelsize=20)
+
+        if plot_catalogs is not False:
+            _draw_catalog_footprints(ax_sky, plot_catalogs, catalog_path, mollweide=True)
+            handles, labels = ax_sky.get_legend_handles_labels()
+            if handles:
+                leg = ax_sky.legend(handles, labels, loc="upper right",
+                                    framealpha=0.4, labelcolor="#aaaaaa",
+                                    facecolor="#1a1a2e", edgecolor="#555555",
+                                    fontsize=11, title="Catalogs", title_fontsize=12)
+                leg.get_title().set_color("#aaaaaa")
 
         if plot_ddf:
             _draw_ddf_markers(ax_sky, mollweide=True)
@@ -271,10 +392,11 @@ def plot_skymap(alerts, title=None, heatmap=False, bin_size_deg=3.5, plot_ddf=Fa
             ax_sky.annotate(f"{hours}h", (-ra_r, label_y), ha="center", va="bottom",
                             color="#bbbbbb", fontsize=17, zorder=5)
         ax_sky.grid(True, alpha=0.3, color="white", linewidth=0.65)
-        ax_sky.set_title(
-            title or f"Alert density heatmap  ({bin_size_deg}° bins)",
-            color="white", pad=14, fontsize=32,
+        default_title = (
+            "Catalog coverage skymap" if alerts is None
+            else f"Alert density heatmap  ({bin_size_deg}° bins)"
         )
+        ax_sky.set_title(title or default_title, color="white", pad=14, fontsize=32)
         plt.tight_layout()
         if save:
             _save_plot(fig, title)
@@ -323,6 +445,9 @@ def plot_skymap(alerts, title=None, heatmap=False, bin_size_deg=3.5, plot_ddf=Fa
                        label=f"{band}  ({len(ba):,})")
         ax_zoom.scatter(ras, decs,
                         s=2 + 28 * sizes, c=color, alpha=0.5, linewidths=0)
+
+    if plot_catalogs is not False:
+        _draw_catalog_footprints(ax_sky, plot_catalogs, catalog_path, mollweide=True)
 
     if plot_ddf:
         _draw_ddf_markers(ax_sky, mollweide=True)

@@ -2,7 +2,7 @@ import base64
 import gzip
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import babamul
@@ -138,7 +138,12 @@ def babamul_get_alerts(
 
     def _to_jd(val):
         if isinstance(val, str):
-            return Time(datetime.strptime(val, "%m-%d-%Y"), format="datetime", scale="utc").jd
+            # Offset by 12 hours so date strings map to noon UTC, the standard
+            # astronomical day boundary. This means "07-06-2026" → noon UTC July 6
+            # and "07-07-2026" → noon UTC July 7, bracketing the full Chilean night
+            # (observations run ~22:00 UTC Jul 6 – ~11:00 UTC Jul 7).
+            dt = datetime.strptime(val, "%m-%d-%Y") + timedelta(hours=12)
+            return Time(dt, format="datetime", scale="utc").jd
         return val
 
     def _jd_to_datestr(jd):
@@ -476,11 +481,23 @@ def combine_alert_files(input_dir, output_path, pattern="*.json.gz", input_files
             combined.extend(json.load(fh))
         print(f"  {f.name}: {len(combined):,} alerts total")
 
+    # Deduplicate by objectId, keeping the first occurrence
+    seen = set()
+    deduped = []
+    for alert in combined:
+        oid = alert.get("objectId")
+        if oid not in seen:
+            seen.add(oid)
+            deduped.append(alert)
+    n_dupes = len(combined) - len(deduped)
+    if n_dupes:
+        print(f"  Removed {n_dupes:,} duplicate alerts ({len(deduped):,} unique).")
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(output_path, "wt") as fh:
-        json.dump(combined, fh)
-    print(f"Saved {len(combined):,} alerts to {output_path}.")
+        json.dump(deduped, fh)
+    print(f"Saved {len(deduped):,} alerts to {output_path}.")
 
     if delete_raw:
         for f in files:
