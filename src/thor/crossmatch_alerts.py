@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -109,6 +110,72 @@ def _print_match_report(crossmatched_objects):
     print(divider)
 
 
+def _print_prost_report(results_df):
+    matched = results_df[results_df['best_cat'].notna()]
+    n = len(matched)
+    print(f"\nMatched Object IDs: {n}")
+
+    if n > 100:
+        print(f"More than 100 matches ({n} total) — skipping per-object summary.")
+        return
+
+    if n == 0:
+        return
+
+    def _isnan(v):
+        try:
+            return math.isnan(v)
+        except (TypeError, ValueError):
+            return v is None
+
+    id_w   = max(len("LSST Object ID"), matched['name'].astype(str).str.len().max())
+    cat_w  = 30
+    z_w    = 8
+    sep_w  = 10
+    post_w = 10
+
+    header = (
+        f"{'LSST Object ID':<{id_w}}  "
+        f"{'Catalog':<{cat_w}}  "
+        f"{'z':>{z_w}}  "
+        f"{'Sep (\")'  :>{sep_w}}  "
+        f"{'Posterior':>{post_w}}"
+    )
+    divider = "-" * len(header)
+    print(divider)
+    print(header)
+    print(divider)
+
+    for _, row in matched.iterrows():
+        first = True
+        for prefix in ("host", "host_2"):
+            objid = row.get(f"{prefix}_objID")
+            post_val = row.get(f"{prefix}_total_posterior")
+            if objid is None or _isnan(objid):
+                continue
+            if _isnan(post_val) or post_val < 0.3:
+                continue
+            z_val   = row.get(f"{prefix}_redshift_mean")
+            sep_val = row.get(f"{prefix}_offset_mean")
+            cat     = row.get("best_cat", "—")
+
+            z_str    = f"{z_val:.3f}"    if not _isnan(z_val)    else "—"
+            sep_str  = f"{sep_val:.2f}"  if not _isnan(sep_val)  else "—"
+            post_str = f"{post_val:.3f}" if not _isnan(post_val) else "—"
+            id_str   = str(row['name']) if first else ""
+
+            print(
+                f"{id_str:<{id_w}}  "
+                f"{cat:<{cat_w}}  "
+                f"{z_str:>{z_w}}  "
+                f"{sep_str:>{sep_w}}  "
+                f"{post_str:>{post_w}}"
+            )
+            first = False
+
+    print(divider)
+
+
 def main():
     dotenv.load_dotenv()
     parser = argparse.ArgumentParser(description="Fetch LSST alerts and crossmatch against catalogs.")
@@ -166,11 +233,35 @@ def main():
     # ── Deduplicate to unique objects ─────────────────────────────────────────
     filtered_objects = filter_functions.deduplicate_alerts(filtered_alerts)
 
+    # ── Optional additional filtering (alert-based, method-independent) ───────
+    if args.additional_filtering == "tde_filter":
+        filtered_objects = filter_functions.filter_alerts(
+            filtered_objects,
+            filter_functions.tde_filter,
+        )
+
     # ── Crossmatch against all available catalogs ─────────────────────────────
+    if args.method == "prost":
+        # Pre-filter with a fast cone search to avoid running prost on alerts
+        # with no catalog coverage at all.
+        cone_matches = filter_functions.catalog_crossmatch(
+            alerts=filtered_objects,
+            method="conesearch",
+            radius_arcsec=10.0,
+        )
+        n_before = len(filtered_objects)
+        filtered_objects = [a for a in filtered_objects if a.objectId in cone_matches]
+        n_after = len(filtered_objects)
+        print(f"10\" pre-filter: cut {n_before - n_after} candidates, running prost on {n_after}.")
+
+    import time
+    _t0 = time.monotonic()
     crossmatched_objects = filter_functions.catalog_crossmatch(
         alerts=filtered_objects,
         method=args.method,
     )
+    _elapsed_min = (time.monotonic() - _t0) / 60
+    print(f"\nRan crossmatch in {_elapsed_min:.1f} minutes on {len(filtered_objects):,} alerts from {args.start} to {args.end}.")
 
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     repo_root = Path(__file__).resolve().parents[2]
@@ -178,6 +269,7 @@ def main():
 
     # ── prost returns a DataFrame; handle separately ──────────────────────────
     if args.method == "prost":
+        _print_prost_report(crossmatched_objects)
         if args.save_result:
             out_dir.mkdir(parents=True, exist_ok=True)
             out_file = out_dir / f"crossmatch_candidates_{timestamp}.csv"
@@ -186,14 +278,6 @@ def main():
         if args.scan:
             _launch_scan_notebook(crossmatched_objects['name'].tolist())
         return
-
-    # ── conesearch path ───────────────────────────────────────────────────────
-    # ── Optional additional filtering ─────────────────────────────────────────
-    if args.additional_filtering == "tde_filter":
-        crossmatched_objects = filter_functions.filter_alerts(
-            crossmatched_objects,
-            filter_functions.tde_filter,
-        )
 
     # ── Report ────────────────────────────────────────────────────────────────
     if not crossmatched_objects:

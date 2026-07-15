@@ -522,8 +522,10 @@ _ZSTD_COL_CANDIDATES = ("z_err", "z_phot_err", "zphot_err", "ez_best", "redshift
 
 
 def _fits_stem_to_prost_key(fname: str) -> str:
-    """COSMOS2025_cut.fits -> cosmos2025"""
-    return fname.replace('.fits', '').replace('_cut', '').lower()
+    """ASTRODEEP_ABELL2744_cut.fits -> astrodeepabell2744 (matches prost's sanitize_input)"""
+    import re
+    stem = fname.replace('.fits', '').replace('_cut', '')
+    return re.sub(r'[_\-\s]', '', stem).lower()
 
 
 def _crossmatch_prost(ra_list, dec_list, name_list, fits_files, catalog_path, priors, likes):
