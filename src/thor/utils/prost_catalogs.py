@@ -39,6 +39,7 @@ import astropy.units as u
 from astropy.coordinates import SkyCoord
 from scipy.stats import norm
 
+import astro_prost.associate as _prost_associate
 from astro_prost.helpers import (
     GalaxyCatalog,
     build_galaxy_array,
@@ -270,4 +271,7 @@ def register_local_catalog(
         z_col=z_col,
         z_std_col=z_std_col,
     )
+    # prost's get_catalogs() resolves catalog names via DEFAULT_RELEASES before
+    # ever reaching GalaxyCatalog, so we must register the name there too.
+    _prost_associate.DEFAULT_RELEASES.setdefault(name, "local")
     _patch_galaxy_catalog_init()

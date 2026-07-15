@@ -135,6 +135,12 @@ def main():
         action="store_true",
         help="Open a temporary Jupyter notebook to scan candidates with scan_alerts (default: off).",
     )
+    parser.add_argument(
+        "--method",
+        default="conesearch",
+        choices=["conesearch", "prost"],
+        help="Crossmatch method: conesearch (default) or prost (probabilistic host association).",
+    )
     args = parser.parse_args()
 
     # ── Fetch alerts ──────────────────────────────────────────────────────────
@@ -163,8 +169,25 @@ def main():
     # ── Crossmatch against all available catalogs ─────────────────────────────
     crossmatched_objects = filter_functions.catalog_crossmatch(
         alerts=filtered_objects,
+        method=args.method,
     )
 
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    repo_root = Path(__file__).resolve().parents[2]
+    out_dir = repo_root / "data" / "lsst_alert_download"
+
+    # ── prost returns a DataFrame; handle separately ──────────────────────────
+    if args.method == "prost":
+        if args.save_result:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_file = out_dir / f"crossmatch_candidates_{timestamp}.csv"
+            crossmatched_objects.to_csv(out_file, index=False)
+            print(f"\nSaved {len(crossmatched_objects):,} prost results to {out_file}")
+        if args.scan:
+            _launch_scan_notebook(crossmatched_objects['name'].tolist())
+        return
+
+    # ── conesearch path ───────────────────────────────────────────────────────
     # ── Optional additional filtering ─────────────────────────────────────────
     if args.additional_filtering == "tde_filter":
         crossmatched_objects = filter_functions.filter_alerts(
@@ -192,9 +215,6 @@ def main():
         for obj_id, obj in crossmatched_objects.items()
     }
 
-    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    repo_root = Path(__file__).resolve().parents[2]
-    out_dir = repo_root / "data" / "lsst_alert_download"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / f"crossmatch_candidates_{timestamp}.json"
 

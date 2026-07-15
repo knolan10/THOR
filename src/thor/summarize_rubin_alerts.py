@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Fetch and visualise LSST alerts for a given date range.
 

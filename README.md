@@ -34,6 +34,29 @@ python src/thor/crossmatch_alerts.py --start 06-28-2026 --end 06-30-2026 --addit
 
 To apply additional TDE-specific filtering, pass `--additional_filtering tde_filter`. Add flag `--save_raw_alerts` to save raw alerts to `data/lsst_alert_download/raw_files/`, and flag `--save_results` in order to save the crossmatch details locally to `data/lsst_alert_download/`. A summary of results will be printed in command line, but the `--scan` flag can also be included to open a temp jupyter notebook in browser and use Babamul's scanning tool.
 
+`catalog_crossmatch` also supports probabilistic host association via [astro_prost](https://github.com/alexandergagliano/galaxy-association) using `method='prost'`. This runs a full Bayesian host-galaxy association across all catalogs in `data/catalogs/`, scoring candidates by offset (and redshift where available) rather than returning all matches within a fixed radius. Each transient is assigned a single best host with a posterior probability; hosts with posterior > 0.3 are printed.
+
+```python
+from thor.utils.filter_functions import catalog_crossmatch
+
+# default cone search
+results = catalog_crossmatch(ra=150.1, dec=2.2)
+
+# probabilistic host association with default offset-only priors
+results = catalog_crossmatch(ra=150.1, dec=2.2, method='prost')
+
+# custom priors and likelihoods (any scipy.stats distribution)
+from scipy.stats import gamma, halfnorm, uniform
+results = catalog_crossmatch(
+    ra=150.1, dec=2.2,
+    method='prost',
+    priors={"offset": uniform(loc=0, scale=10)},
+    likes={"offset": gamma(a=0.75)},
+)
+```
+
+Priors and likelihoods must be `scipy.stats` distributions and are keyed by property name (`"offset"`, `"redshift"`). See the [astro_prost documentation](https://github.com/alexandergagliano/galaxy-association) for the full list of supported properties and association options.
+
 
 ### Data
 
