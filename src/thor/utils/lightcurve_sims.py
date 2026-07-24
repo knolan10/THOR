@@ -852,3 +852,49 @@ def plot_transient_magnitude_timescale(
     if standalone:
         plt.tight_layout()
         plt.show()
+
+
+def plot_rubin_abs_mag_limit(z_max=5, ax=None):
+    """Plot Rubin LSST r-band detection limit as absolute magnitude vs redshift.
+
+    Parameters
+    ----------
+    z_max : float
+        Maximum redshift for the x-axis. Default 5.
+    ax : matplotlib.axes.Axes, optional
+        Axes to plot on. If None, a new figure is created.
+    """
+    from astropy.cosmology import Planck18
+
+    standalone = ax is None
+    if standalone:
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+    z = np.linspace(0.01, z_max, 500)
+
+    # Rubin LSST r-band 5-sigma depths (Ivezic+2019)
+    rubin_limits = {
+        'Single visit (r~24.5)': 24.5,
+        '10-yr coadd (r~27.5)': 27.5,
+    }
+
+    # Luminosity distance -> distance modulus
+    dl_pc = Planck18.luminosity_distance(z).to(u.pc).value
+    DM = 5 * np.log10(dl_pc / 10)
+
+    for label, m_lim in rubin_limits.items():
+        # M = m - DM  (no K-correction)
+        M_lim = m_lim - DM
+        ax.plot(z, M_lim, label=label)
+
+    ax.invert_yaxis()
+    ax.set_xlabel('Redshift')
+    ax.set_ylabel(r'Absolute magnitude $M_r$ [AB]')
+    ax.set_xlim(0, z_max)
+    ax.set_title('Rubin LSST detection limit vs redshift (r-band, no K-correction)')
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    if standalone:
+        plt.tight_layout()
+        plt.show()

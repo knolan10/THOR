@@ -40,7 +40,7 @@ Pass `--method prost` to use probabilistic host association via [astro_prost](ht
 python src/thor/crossmatch_alerts.py --start 06-28-2026 --end 06-30-2026 --method prost --additional_filtering tde_filter --scan
 ```
 
-Results are saved as a `.csv` (one row per transient) rather than `.json`. Transients with a host posterior > 0.3 are printed to the command line.
+Results are saved as a `.csv` (one row per transient) if . Transients with a host posterior > 0.3 are printed to the command line.
 
 The script currently uses galaxy offset as the default scoring property, with a `uniform(0, 10)` prior and `gamma(a=0.75)` likelihood. Redshift information is loaded from catalogs where available and can be included in scoring via custom priors. For more flexibility, see the Prost section of the [crossmatching notebook](docs/notebooks/Example_LSST_Catalog_Crossmatching.ipynb) or the [astro_prost documentation](https://github.com/alexandergagliano/galaxy-association) for the full list of supported properties and association options.
 
