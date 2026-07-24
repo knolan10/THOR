@@ -6,7 +6,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import babamul
+import numpy as np
+from astropy.coordinates import SkyCoord
+from astropy.cosmology import Planck18 as cosmo
 from astropy.time import Time
+import astropy.units as u
 from babamul import LsstAlert, ZtfAlert
 from pydantic import ValidationError
 
@@ -503,3 +507,147 @@ def combine_alert_files(input_dir, output_path, pattern="*.json.gz", input_files
         for f in files:
             f.unlink()
         print(f"Deleted {len(files)} raw chunk files from {input_dir}.")
+
+
+# ── Positional separation utilities ───────────────────────────────────────────
+
+_Z_COLS = ("z", "z_phot", "zphot", "photoz", "z_best", "redshift")
+_Z_UNC_COLS = ("z_err", "z_unc", "z_phot_err", "zphot_err", "ez_best", "redshift_err")
+
+
+def angular_sep_to_parsecs_with_error(redshift, separation_arcsec, sigma_sep_arcsec, sigma_z):
+    """
+    Convert angular separation to physical separation in parsecs,
+    with error propagation from position and redshift uncertainties.
+
+    Uses angular diameter distance d_A, which correctly accounts for photons
+    traveling through expanding space.
+
+    Parameters
+    ----------
+    redshift : float
+    separation_arcsec : float
+    sigma_sep_arcsec : float
+        Combined 1-sigma angular separation uncertainty in arcsec.
+    sigma_z : float
+        1-sigma redshift uncertainty.
+
+    Returns
+    -------
+    sep_pc : float
+    sep_err_pc : float
+    """
+    arcsec_to_rad = (1 * u.arcsec).to(u.rad).value
+    d_A_pc = cosmo.angular_diameter_distance(redshift).to(u.pc).value
+
+    sep_rad = separation_arcsec * arcsec_to_rad
+    sep_pc = d_A_pc * sep_rad
+
+    sigma_sep_rad = sigma_sep_arcsec * arcsec_to_rad
+    err_position = d_A_pc * sigma_sep_rad
+
+    dz = 1e-4
+    d_A_plus  = cosmo.angular_diameter_distance(redshift + dz).to(u.pc).value
+    d_A_minus = cosmo.angular_diameter_distance(redshift - dz).to(u.pc).value
+    dd_A_dz = (d_A_plus - d_A_minus) / (2 * dz)
+    err_redshift = dd_A_dz * sep_rad * sigma_z
+
+    sep_err_pc = np.sqrt(err_position**2 + err_redshift**2)
+    return sep_pc, sep_err_pc
+
+
+def get_catalog_separation_parsecs(alert, catalog_entry: dict, catalog_name: str):
+    """
+    Compute physical separation (pc) between an alert and a catalog crossmatch entry,
+    with full error propagation.
+
+    Position uncertainty priority:
+      1. Per-source: catalog_entry['pos_unc'] (arcsec) if present and not None.
+      2. Global: global_ra_unc_mas / global_dec_unc_mas from catalogs_catalog.py,
+         combined in quadrature.
+      3. Fallback: 0.05 arcsec (50 mas).
+
+    The angular separation is always computed from SkyCoord.
+
+    Parameters
+    ----------
+    alert : LsstAlert | ZtfAlert | dict
+    catalog_entry : dict
+        Single row from catalog_crossmatch output.
+    catalog_name : str
+        Catalog stem or filename (e.g. 'COSMOS2025_cut' or 'COSMOS2025_cut.fits').
+
+    Returns
+    -------
+    (sep_pc, sep_err_pc) : (float, float) or (None, None) if z unavailable.
+    """
+    from thor.catalogs_catalog import catalogs as _catalogs_meta
+
+    # --- alert position ---
+    if hasattr(alert, 'candidate'):
+        alert_ra  = alert.candidate.ra
+        alert_dec = alert.candidate.dec
+        alert_ra_unc_deg  = alert.candidate.raErr  or 0.0
+        alert_dec_unc_deg = alert.candidate.decErr or 0.0
+    else:
+        alert_ra  = alert['ra']
+        alert_dec = alert['dec']
+        alert_ra_unc_deg  = alert.get('raErr')  or 0.0
+        alert_dec_unc_deg = alert.get('decErr') or 0.0
+
+    # --- catalog position ---
+    catalog_ra  = catalog_entry.get('ra')
+    catalog_dec = catalog_entry.get('dec')
+    if catalog_ra is None or catalog_dec is None:
+        return None, None
+
+    # --- redshift ---
+    cols_lower = {k.lower(): k for k in catalog_entry}
+    z_key = next((cols_lower[c] for c in _Z_COLS if c in cols_lower), None)
+    if z_key is None:
+        return None, None
+    z = catalog_entry[z_key]
+    if z is None or z <= 0:
+        return None, None
+
+    z_unc_key = next((cols_lower[c] for c in _Z_UNC_COLS if c in cols_lower), None)
+    z_unc = catalog_entry[z_unc_key] if z_unc_key is not None else 0.0
+    if z_unc is None:
+        z_unc = 0.0
+
+    # --- angular separation ---
+    c1 = SkyCoord(ra=alert_ra * u.deg, dec=alert_dec * u.deg)
+    c2 = SkyCoord(ra=catalog_ra * u.deg, dec=catalog_dec * u.deg)
+    sep_arcsec = c1.separation(c2).to(u.arcsec).value
+
+    # --- catalog position uncertainty ---
+    pos_unc = catalog_entry.get('pos_unc')
+    if pos_unc is not None:
+        catalog_sigma_arcsec = float(pos_unc)
+    else:
+        meta_key = catalog_name if catalog_name.endswith('.fits') else catalog_name + '.fits'
+        meta = _catalogs_meta.get(meta_key, {})
+        ra_mas  = meta.get("global_ra_unc_mas")
+        dec_mas = meta.get("global_dec_unc_mas")
+        ra_unc  = (ra_mas  / 1000.0) if ra_mas  is not None else 0.0
+        dec_unc = (dec_mas / 1000.0) if dec_mas is not None else 0.0
+        if ra_unc > 0.0 or dec_unc > 0.0:
+            catalog_sigma_arcsec = np.sqrt(ra_unc**2 + dec_unc**2)
+        else:
+            catalog_sigma_arcsec = 0.05  # 50 mas fallback
+
+    # --- alert position uncertainty (deg -> arcsec) ---
+    alert_ra_unc_arcsec  = alert_ra_unc_deg  * 3600 * np.cos(np.radians(alert_dec))
+    alert_dec_unc_arcsec = alert_dec_unc_deg * 3600
+
+    sigma_sep_arcsec = np.sqrt(
+        alert_ra_unc_arcsec**2 + alert_dec_unc_arcsec**2
+        + catalog_sigma_arcsec**2
+    )
+
+    return angular_sep_to_parsecs_with_error(
+        redshift=z,
+        separation_arcsec=sep_arcsec,
+        sigma_sep_arcsec=sigma_sep_arcsec,
+        sigma_z=z_unc,
+    )

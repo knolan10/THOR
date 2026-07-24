@@ -10,9 +10,10 @@ from pathlib import Path
 import dotenv
 
 from thor.utils import filter_functions
-from thor.utils.fetch_alerts import babamul_get_alerts
+from thor.utils.fetch_alerts import babamul_get_alerts, angular_sep_to_parsecs_with_error
 
-Z_COLS = {"z", "Z_BEST", "ZPHOT", "zfinal", "zpdf_med"}
+Z_COLS     = {"z", "Z_BEST", "ZPHOT", "zfinal", "zpdf_med"}
+Z_UNC_COLS = {"z_unc", "z_err", "z_phot_err", "zphot_err", "ez_best", "redshift_err"}
 
 
 def _launch_scan_notebook(object_ids):
@@ -73,16 +74,18 @@ def _print_match_report(crossmatched_objects):
         return
 
     # column widths
-    id_w = max(len("LSST Object ID"), max(len(str(oid)) for oid in crossmatched_objects))
-    cat_w = 30
-    z_w = 8
-    sep_w = 10
+    id_w   = max(len("LSST Object ID"), max(len(str(oid)) for oid in crossmatched_objects))
+    cat_w  = 30
+    z_w    = 14  # "1.234±0.056"
+    sep_w  = 10
+    dist_w = 18  # "1234.56±789.01 kpc"
 
     header = (
         f"{'LSST Object ID':<{id_w}}  "
         f"{'Catalog':<{cat_w}}  "
         f"{'z':>{z_w}}  "
-        f"{'Sep (\")':>{sep_w}}"
+        f"{'Sep (\")':>{sep_w}}  "
+        f"{'Dist (kpc)':>{dist_w}}"
     )
     divider = "-" * len(header)
     print(divider)
@@ -94,16 +97,32 @@ def _print_match_report(crossmatched_objects):
         for catalog, data in obj.items():
             if catalog == "LSST" or data is None:
                 continue
-            z_val = next((data[c] for c in Z_COLS if c in data and data[c] is not None), None)
-            sep_val = data.get("conesearch_arcsecs")
-            z_str = f"{z_val:.3f}" if z_val is not None else "—"
-            sep_str = f"{sep_val:.2f}" if sep_val is not None else "—"
+            z_val     = next((data[c] for c in Z_COLS     if c in data and data[c] is not None), None)
+            z_unc_val = next((data[c] for c in Z_UNC_COLS if c in data and data[c] is not None), None)
+            sep_val   = data.get("conesearch_arcsecs")
+            sep_pc    = data.get("sep_pc")
+            sep_err_pc = data.get("sep_err_pc")
+
+            if z_val is not None and z_unc_val is not None:
+                z_str = f"{z_val:.3f}±{z_unc_val:.3f}"
+            elif z_val is not None:
+                z_str = f"{z_val:.3f}"
+            else:
+                z_str = "—"
+
+            sep_str  = f"{sep_val:.2f}" if sep_val is not None else "—"
+            if sep_pc is not None and sep_err_pc is not None:
+                dist_str = f"{sep_pc/1000:.2f}±{sep_err_pc/1000:.2f} kpc"
+            else:
+                dist_str = "—"
+
             id_str = str(obj_id) if first else ""
             print(
                 f"{id_str:<{id_w}}  "
                 f"{catalog:<{cat_w}}  "
                 f"{z_str:>{z_w}}  "
-                f"{sep_str:>{sep_w}}"
+                f"{sep_str:>{sep_w}}  "
+                f"{dist_str:>{dist_w}}"
             )
             first = False
 
@@ -130,15 +149,17 @@ def _print_prost_report(results_df):
 
     id_w   = max(len("LSST Object ID"), matched['name'].astype(str).str.len().max())
     cat_w  = 30
-    z_w    = 8
+    z_w    = 14  # "1.234±0.056"
     sep_w  = 10
+    dist_w = 18  # "1234.56±789.01 kpc"
     post_w = 10
 
     header = (
         f"{'LSST Object ID':<{id_w}}  "
         f"{'Catalog':<{cat_w}}  "
         f"{'z':>{z_w}}  "
-        f"{'Sep (\")'  :>{sep_w}}  "
+        f"{'Sep (\")':>{sep_w}}  "
+        f"{'Dist (kpc)':>{dist_w}}  "
         f"{'Posterior':>{post_w}}"
     )
     divider = "-" * len(header)
@@ -149,18 +170,35 @@ def _print_prost_report(results_df):
     for _, row in matched.iterrows():
         first = True
         for prefix in ("host", "host_2"):
-            objid = row.get(f"{prefix}_objID")
+            objid    = row.get(f"{prefix}_objID")
             post_val = row.get(f"{prefix}_total_posterior")
             if objid is None or _isnan(objid):
                 continue
             if _isnan(post_val) or post_val < 0.3:
                 continue
-            z_val   = row.get(f"{prefix}_redshift_mean")
-            sep_val = row.get(f"{prefix}_offset_mean")
-            cat     = row.get("best_cat", "—")
+            z_val     = row.get(f"{prefix}_redshift_mean")
+            z_unc_val = row.get(f"{prefix}_redshift_std")
+            sep_val   = row.get(f"{prefix}_offset_mean")   # arcsec
+            sep_unc   = row.get(f"{prefix}_offset_std")
+            cat       = row.get("best_cat", "—")
 
-            z_str    = f"{z_val:.3f}"    if not _isnan(z_val)    else "—"
-            sep_str  = f"{sep_val:.2f}"  if not _isnan(sep_val)  else "—"
+            if not _isnan(z_val) and not _isnan(z_unc_val):
+                z_str = f"{z_val:.3f}±{z_unc_val:.3f}"
+            elif not _isnan(z_val):
+                z_str = f"{z_val:.3f}"
+            else:
+                z_str = "—"
+
+            sep_str = f"{sep_val:.2f}" if not _isnan(sep_val) else "—"
+
+            if not _isnan(z_val) and z_val > 0 and not _isnan(sep_val):
+                sigma_sep = sep_unc if (sep_unc is not None and not _isnan(sep_unc)) else 0.0
+                sigma_z   = z_unc_val if (z_unc_val is not None and not _isnan(z_unc_val)) else 0.0
+                sep_pc, sep_err_pc = angular_sep_to_parsecs_with_error(z_val, sep_val, sigma_sep, sigma_z)
+                dist_str = f"{sep_pc/1000:.2f}±{sep_err_pc/1000:.2f} kpc"
+            else:
+                dist_str = "—"
+
             post_str = f"{post_val:.3f}" if not _isnan(post_val) else "—"
             id_str   = str(row['name']) if first else ""
 
@@ -169,6 +207,7 @@ def _print_prost_report(results_df):
                 f"{cat:<{cat_w}}  "
                 f"{z_str:>{z_w}}  "
                 f"{sep_str:>{sep_w}}  "
+                f"{dist_str:>{dist_w}}  "
                 f"{post_str:>{post_w}}"
             )
             first = False

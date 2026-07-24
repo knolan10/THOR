@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 from collections import defaultdict
 
-from thor.utils.fetch_alerts import babamul_get_alerts
+from thor.utils.fetch_alerts import babamul_get_alerts, get_catalog_separation_parsecs
 
 
 
@@ -492,9 +492,12 @@ def catalog_crossmatch(
         row_dicts = []
         for j, (i, matched) in enumerate(zip(idx, within)):
             if matched:
-                row_dict = {c: _safe_val(cat[c][i])
-                            for c in cat.colnames if c not in (ra_col, dec_col)}
+                row_dict = {c: _safe_val(cat[c][i]) for c in cat.colnames}
                 row_dict['conesearch_arcsecs'] = float(sep_arcsec[j])
+                alert_or_coord = alerts[j] if alerts is not None else {"ra": ra_list[j], "dec": dec_list[j]}
+                sep_pc, sep_err_pc = get_catalog_separation_parsecs(alert_or_coord, row_dict, fname)
+                row_dict['sep_pc']     = sep_pc
+                row_dict['sep_err_pc'] = sep_err_pc
                 row_dicts.append((j, row_dict))
             else:
                 row_dicts.append((j, None))
