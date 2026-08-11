@@ -4,6 +4,7 @@ catalogs = {
         "ra_range": [149.6641, 150.5770],
         "dec_range": [1.7294, 2.6873],
         "coverage_deg2": 0.87,
+        "ebv": 0.018,  # Schlegel, Finkbeiner & Davis 1998
         "global_ra_unc_mas" : 0.35, #https://arxiv.org/pdf/2506.03243 pg 3
         "global_dec_unc_mas" : 6,
         "z_max": 14.1049,
@@ -15,6 +16,7 @@ catalogs = {
         "ra_range": [149.2942, 150.7861],
         "dec_range": [1.5976, 2.8102],
         "coverage_deg2": 1.81,
+        "ebv": 0.018,  # Schlegel, Finkbeiner & Davis 1998; COSMOS field
         "global_ra_unc_mas" : None,
         "global_dec_unc_mas" : None,
         "z_max": 5.9900,
@@ -26,6 +28,7 @@ catalogs = {
         "ra_range": [33.8510, 37.1751],
         "dec_range": [-5.6290, -3.9996],
         "coverage_deg2": 5.4,
+        "ebv": 0.025,  # Schlegel 1998 dust maps; XMM-LSS field average
         "global_ra_unc_mas" : None,
         "global_dec_unc_mas" : None,
         "z_max": 5.9899,
@@ -37,6 +40,7 @@ catalogs = {
         "ra_range": [350.2710, 354.1673],
         "dec_range": [-1.5791, 1.2104],
         "coverage_deg2": 10.87,
+        "ebv": 0.040,  # Schlegel 1998; DEEP2-3 field (near equatorial plane, moderate MW dust)
         "global_ra_unc_mas" : None,
         "global_dec_unc_mas" : None,
         "z_max": 5.9900,
@@ -48,6 +52,7 @@ catalogs = {
         "ra_range": [3.4429, 3.6725],
         "dec_range": [-30.4607, -30.2899],
         "coverage_deg2": 0.034,
+        "ebv": 0.012,  # Schlegel 1998; high southern galactic latitude, very low dust
         "global_ra_unc_mas" : 50,
         "global_dec_unc_mas" : 50,
         "z_max": 20,
@@ -59,6 +64,7 @@ catalogs = {
         "ra_range": [53.0072, 53.2274],
         "dec_range": [-27.9242, -27.7238],
         "coverage_deg2": 0.039,
+        "ebv": 0.008,  # Schlegel 1998; GOODS-South field (A_V=0.0248, Schlegel+1998)
         "global_ra_unc_mas" : 50,
         "global_dec_unc_mas" : 50,
         "z_max": 20,
@@ -70,6 +76,7 @@ catalogs = {
         "ra_range": [53.2146, 53.2885],
         "dec_range": [-27.8880, -27.7933],
         "coverage_deg2": 0.0062,
+        "ebv": 0.008,  # Schlegel 1998; GOODS-South / HUDF adjacent
         "global_ra_unc_mas" : 50,
         "global_dec_unc_mas" : 50,
         "z_max": 19.925,
@@ -81,6 +88,7 @@ catalogs = {
         "ra_range": [150.0500, 150.2111],
         "dec_range": [2.1558, 2.4943],
         "coverage_deg2": 0.054,
+        "ebv": 0.018,  # Schlegel 1998; COSMOS field
         "global_ra_unc_mas" : 50,
         "global_dec_unc_mas" : 50,
         "z_max": 20,
@@ -92,6 +100,7 @@ catalogs = {
         "ra_range": [34.1997, 34.5388],
         "dec_range": [-5.3265, -5.0756],
         "coverage_deg2": 0.085,
+        "ebv": 0.020,  # Schlegel 1998; UDS field (near XMM-LSS, low MW dust)
         "global_ra_unc_mas" : 50,
         "global_dec_unc_mas" : 50,
         "z_max": 20,
