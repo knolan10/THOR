@@ -81,10 +81,10 @@ def get_BTS_rates_from_filtered(volumetric_obs_dict, efficiency_dict, verbose=Tr
     return BTSpoprates
 
 def calculate_rates_zbin(object_rate, z_bin_min, z_bin_max):
-    """Input:"""
-    vol_bin = (cosmo.comoving_volume(z_bin_max) - cosmo.comoving_volume(z_bin_min)).to(u.Gpc**3) # convert to Gpc^3
-    rate_in_bin = object_rate * vol_bin  # number of objects per year in this bin
-    return rate_in_bin
+    """Input: object_rate in Gpc^-3 yr^-1 (astropy Quantity or plain float)"""
+    vol_bin_gpc3 = (cosmo.comoving_volume(z_bin_max) - cosmo.comoving_volume(z_bin_min)).to(u.Gpc**3).value
+    rate_gpc3 = object_rate.to(u.Gpc**-3).value if hasattr(object_rate, 'unit') else float(object_rate)
+    return rate_gpc3 * vol_bin_gpc3
 
 def redshift_wavelength(z, rest_wavelength=1216):
     """

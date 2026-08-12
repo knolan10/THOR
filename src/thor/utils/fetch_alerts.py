@@ -93,6 +93,7 @@ def babamul_get_alerts(
     checkpoint_path: str | None = None,
     checkpoint_every: int = 10,
     save: bool = True,
+    verbose: bool = False,
 ):
     """
     Thin wrapper around babamul.api.get_alerts.
@@ -133,6 +134,8 @@ def babamul_get_alerts(
         For multi-day ranges, alerts are saved in chunks of checkpoint_every nights.
         For single-day fetches, all alerts are saved in one file on completion.
         Set to False to return alerts in memory only.
+    verbose : bool
+        If True, print progress messages. Default False.
 
     Returns
     -------
@@ -166,10 +169,12 @@ def babamul_get_alerts(
         window = end_jd - start_jd
         min_chunk = 1/288  # 5 minutes
         if window <= min_chunk:
-            print(f"  WARNING: JD {start_jd:.4f}–{end_jd:.4f} ({window*24*60:.0f} min) still at cap — results may be truncated")
+            if verbose:
+                print(f"  WARNING: JD {start_jd:.4f}–{end_jd:.4f} ({window*24*60:.0f} min) still at cap — results may be truncated")
             return raw
         next_chunk = min_chunk if window <= chunk_size else chunk_size
-        print(f"  cap hit JD {start_jd:.4f}–{end_jd:.4f} ({window*24*60:.0f} min), splitting into {next_chunk*24*60:.0f}-min chunks")
+        if verbose:
+            print(f"  cap hit JD {start_jd:.4f}–{end_jd:.4f} ({window*24*60:.0f} min), splitting into {next_chunk*24*60:.0f}-min chunks")
         results = []
         t = start_jd
         while t < end_jd:
@@ -181,7 +186,8 @@ def babamul_get_alerts(
     def _fetch_and_validate(start_jd, end_jd):
         start_str = f"{start_jd:.5f}" if start_jd is not None else "any"
         end_str = f"{end_jd:.5f}" if end_jd is not None else "any"
-        print(f"Fetching alerts for JD {start_str} to {end_str}...")
+        if verbose:
+            print(f"Fetching alerts for JD {start_str} to {end_str}...")
         valid, skipped = [], []
         first_error = None
         for raw in _fetch_raw(start_jd, end_jd):
@@ -273,7 +279,6 @@ def babamul_get_alerts(
     if all_skipped:
         print(f"Skipped {len(all_skipped):,} invalid alerts.")
 
-    print(f"Fetched {len(all_alerts):,} alerts total.")
     return all_alerts
 
 # ── I/O ───────────────────────────────────────────────────────────────────────
