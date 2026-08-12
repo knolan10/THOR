@@ -18,3 +18,4 @@ seaborn
 tqdm
 PyYAML
 pycurl
+sparclclient
