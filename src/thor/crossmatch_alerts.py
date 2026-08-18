@@ -11,6 +11,7 @@ import dotenv
 
 from thor.utils import filter_functions
 from thor.utils.fetch_alerts import babamul_get_alerts, angular_sep_to_parsecs_with_error
+from thor.utils.bookkeeeping import Slacker
 
 Z_COLS     = {"z", "Z_BEST", "ZPHOT", "zfinal", "zpdf_med"}
 Z_UNC_COLS = {"z_unc", "z_err", "z_phot_err", "zphot_err", "ez_best", "redshift_err"}
@@ -233,6 +234,7 @@ def main():
     )
     parser.add_argument(
         "--save_result",
+        "--save_results",
         action="store_true",
         help="Save crossmatch results to data/lsst_alert_download/ (default: off).",
     )
@@ -240,6 +242,11 @@ def main():
         "--scan",
         action="store_true",
         help="Open a temporary Jupyter notebook to scan candidates with scan_alerts (default: off).",
+    )
+    parser.add_argument(
+        "--slack",
+        action="store_true",
+        help="Send crossmatch results summary to Slack (default: off).",
     )
     parser.add_argument(
         "--method",
@@ -324,6 +331,11 @@ def main():
         return
 
     _print_match_report(crossmatched_objects)
+
+    # ── Optionally send Slack ────────────────────────────────────────────────────────────────
+    if args.slack:
+        slacker = Slacker(webhook_url=os.environ.get("slack_webhook_kira"))
+        slacker.slack_crossmatch_results(len(loaded_alerts), len(crossmatched_objects))
 
     # ── Optionally scan in Jupyter ────────────────────────────────────────────
     if args.scan:

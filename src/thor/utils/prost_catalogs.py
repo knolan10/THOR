@@ -177,8 +177,10 @@ def make_local_catalog_fn(df, catalog_label="local", z_col="z", z_std_col=None):
 
             if z_std_col and z_std_col in candidate_hosts.columns:
                 redshift_std = candidate_hosts[z_std_col].values.astype(float)
+                reported_std = redshift_std
             else:
                 redshift_std = np.maximum(Z_STD_FRAC * redshift_mean, 0.01)
+                reported_std = np.full(n_galaxies, np.nan)
 
             redshift_samples = np.maximum(
                 REDSHIFT_FLOOR,
@@ -190,7 +192,7 @@ def make_local_catalog_fn(df, catalog_label="local", z_col="z", z_std_col=None):
             )
 
             galaxies["redshift_mean"] = redshift_mean
-            galaxies["redshift_std"]  = redshift_std
+            galaxies["redshift_std"]  = reported_std
             galaxies["redshift_info"] = "PHOT"
 
             for i in range(n_galaxies):
