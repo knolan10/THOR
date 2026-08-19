@@ -4,17 +4,33 @@ import math
 import os
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+import pandas as pd
 
 import dotenv
 
 from thor.utils import filter_functions
 from thor.utils.fetch_alerts import babamul_get_alerts, angular_sep_to_parsecs_with_error
-from thor.utils.bookkeeeping import Slacker
+from thor.utils.bookkeeeping import Slacker, RateLimiter, post_candidate_to_fritz, post_auto_annotation_fritz
 
 Z_COLS     = {"z", "Z_BEST", "ZPHOT", "zfinal", "zpdf_med"}
 Z_UNC_COLS = {"z_unc", "z_err", "z_phot_err", "zphot_err", "ez_best", "redshift_err"}
+
+
+def _fritz_call_with_retry(fn, *args, fail_log, obj_id, label, **kwargs):
+    """Call a Fritz API function; retry once after 5 s on failure and log persistent errors."""
+    try:
+        fn(*args, **kwargs)
+    except Exception as e:
+        time.sleep(5)
+        try:
+            fn(*args, **kwargs)
+        except Exception as e2:
+            fail_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(fail_log, "a") as f:
+                f.write(f"object_id={obj_id}  call={label}  error={e2}\n")
 
 
 def _launch_scan_notebook(object_ids):
@@ -216,6 +232,62 @@ def _print_prost_report(results_df):
     print(divider)
 
 
+def build_catalog_dict(row) -> dict:
+    """
+    organize prost output to post as auto annoatation on Fritz
+    """
+    if isinstance(row, pd.DataFrame):                                                                                                                                                    
+        row = row.iloc[0]                                                                                                                                                                
+                                                                                                                                                                                        
+    def r3(val):                                                                                                                                                                         
+        try:                                                                                                                                                                           
+            return float(round(float(val), 3))
+        except (TypeError, ValueError):
+            return val
+
+    def native(val):
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return val                                                                                                                                                                   
+
+    def clean(d):                                                                                                                                                                        
+        return {k: v for k, v in d.items() if not (v is None or v != v or v == 0)}                                                                                                     
+
+    catalog = str(row['best_cat'])
+    result = {catalog: clean({
+        'host1_id': native(row['host_objID']),
+        'host1_total_posterior': r3(row['host_total_posterior']),
+        'host1_ra': r3(row['host_ra']),                                                                                                                                                  
+        'host1_dec': r3(row['host_dec']),
+        'host1_redshift_mean': r3(row['host_redshift_mean']),                                                                                                                            
+        'host1_redshift_std': r3(row['host_redshift_std']),                                                                                                                            
+        'host1_redshift_info': str(row['host_redshift_info']),                                                                                                                           
+        'host1_absmag_mean': r3(row['host_absmag_mean']),
+        'host1_absmag_std': r3(row['host_absmag_std']),                                                                                                                                  
+        'host1_offset_mean': r3(row['host_offset_mean']),                                                                                                                              
+        'host1_offset_std': r3(row['host_offset_std']),                                                                                                                                  
+    })}
+                                                                                                                                                                                        
+    if row['host_2_total_posterior'] >= 0.1:                                                                                                                                           
+        result[catalog].update(clean({
+            'host2_id': native(row['host_2_objID']),
+            'host2_total_posterior': r3(row['host_2_total_posterior']),
+            'host2_ra': r3(row['host_2_ra']),                                                                                                                                            
+            'host2_dec': r3(row['host_2_dec']),
+            'host2_redshift_mean': r3(row['host_2_redshift_mean']),                                                                                                                      
+            'host2_redshift_std': r3(row['host_2_redshift_std']),                                                                                                                      
+            'host2_redshift_info': str(row['host_2_redshift_info']),                                                                                                                     
+            'host2_absmag_mean': r3(row['host_2_absmag_mean']),
+            'host2_absmag_std': r3(row['host_2_absmag_std']),                                                                                                                            
+            'host2_absmag_info': str(row['host_2_absmag_info']),                                                                                                                       
+            'host2_offset_mean': r3(row['host_2_offset_mean']),                                                                                                                          
+            'host2_offset_std': r3(row['host_2_offset_std']),
+        }))                                                                                                                                                                              
+                                                                                                                                                                                        
+    return result
+
+
 def main():
     dotenv.load_dotenv()
     parser = argparse.ArgumentParser(description="Fetch LSST alerts and crossmatch against catalogs.")
@@ -236,7 +308,12 @@ def main():
         "--save_result",
         "--save_results",
         action="store_true",
-        help="Save crossmatch results to data/lsst_alert_download/ (default: off).",
+        help="Save crossmatch results to data/crossmatch_results/ (default: off).",
+    )
+    parser.add_argument(
+        "--post_fritz",
+        action="store_true",
+        help="Post crossmatch candidates to Fritz (default: off).",
     )
     parser.add_argument(
         "--scan",
@@ -311,11 +388,61 @@ def main():
 
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     repo_root = Path(__file__).resolve().parents[2]
-    out_dir = repo_root / "data" / "lsst_alert_download"
+    out_dir = repo_root / "data" / "crossmatch_results"
 
     # ── prost returns a DataFrame; handle separately ──────────────────────────
     if args.method == "prost":
         _print_prost_report(crossmatched_objects)
+        if args.post_fritz and len(crossmatched_objects) > 500:
+            slacker = Slacker(webhook_url=os.environ.get("slack_webhook_kira"))
+            date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+            slacker.generic_slack_message(
+                f"Crossmatch on {date_str} passed {len(crossmatched_objects)} candidates — skipping automated post to Fritz"
+            )
+        elif args.post_fritz:
+            fritztoken = os.getenv("fritz_token")
+            filterid = [int(os.getenv("filterid").split("#")[0].strip())]
+            groupid = [int(os.getenv("groupid").split("#")[0].strip())]
+            boomid = int(os.getenv("boom_broker_id", "1"))
+            passedtime = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            fritz_limiter = RateLimiter(max_calls=50, period=10)
+            date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+            fail_log = out_dir / f"failed_fritz_posts_{date_str}.txt"
+            for _, row in crossmatched_objects.iterrows():
+                objectid = str(row["name"])
+                _fritz_call_with_retry(
+                    post_candidate_to_fritz,
+                    object_id=objectid,
+                    ra=float(row["ra"]),
+                    dec=float(row["dec"]),
+                    time=passedtime,
+                    filter_ids=filterid,
+                    broker_id=boomid,
+                    group_ids=groupid,
+                    token=fritztoken,
+                    fail_log=fail_log,
+                    obj_id=objectid,
+                    label="post_candidate",
+                )
+                fritz_limiter()
+                catalog_dict = build_catalog_dict(row)
+                for catalog_id in catalog_dict:
+                    _fritz_call_with_retry(
+                        post_auto_annotation_fritz,
+                        object_id=objectid,
+                        catalog_id=catalog_id,
+                        catalog_dict=catalog_dict,
+                        group_ids=groupid,
+                        fritz_token=fritztoken,
+                        fail_log=fail_log,
+                        obj_id=objectid,
+                        label=f"post_annotation:{catalog_id}",
+                    )
+                    fritz_limiter()
+            if fail_log.exists():
+                Slacker(webhook_url=os.environ.get("slack_webhook_kira")).generic_slack_message(
+                    f"Some candidates failed to post to Fritz — inspect logs in data/crossmatch_results/{fail_log.name}"
+                )
         if args.save_result:
             out_dir.mkdir(parents=True, exist_ok=True)
             out_file = out_dir / f"crossmatch_candidates_{timestamp}.csv"
@@ -331,6 +458,61 @@ def main():
         return
 
     _print_match_report(crossmatched_objects)
+
+    # ── Post candidates to Fritz ───────────────────────────────────────────────
+    if args.post_fritz and len(crossmatched_objects) > 500:
+        slacker = Slacker(webhook_url=os.environ.get("slack_webhook_kira"))
+        date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+        slacker.generic_slack_message(
+            f"Crossmatch on {date_str} passed {len(crossmatched_objects)} candidates — skipping automated post to Fritz"
+        )
+    elif args.post_fritz:
+        fritztoken = os.getenv("fritz_token")
+        filterid = [int(os.getenv("filterid"))]
+        groupid = [int(os.getenv("groupid"))]
+        boomid = int(os.getenv("broker_id", "1")) # boomid = 1
+        passedtime = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        fritz_limiter = RateLimiter(max_calls=50, period=10)
+        date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+        fail_log = out_dir / f"failed_fritz_posts_{date_str}.txt"
+        for obj_id, obj in crossmatched_objects.items():
+            alert = obj["LSST"]
+            _fritz_call_with_retry(
+                post_candidate_to_fritz,
+                object_id=str(obj_id),
+                ra=alert.ra,
+                dec=alert.dec,
+                time=passedtime,
+                filter_ids=filterid,
+                broker_id=boomid,
+                group_ids=groupid,
+                token=fritztoken,
+                fail_log=fail_log,
+                obj_id=str(obj_id),
+                label="post_candidate",
+            )
+            fritz_limiter()
+        if args.method == "prost":
+            for _, row in crossmatched_objects.iterrows():
+                objectid = str(row["name"])
+                catalog_dict = build_catalog_dict(row)
+                for catalog_id in catalog_dict:
+                    _fritz_call_with_retry(
+                        post_auto_annotation_fritz,
+                        object_id=objectid,
+                        catalog_id=catalog_id,
+                        catalog_dict=catalog_dict,
+                        group_ids=groupid,
+                        fritz_token=fritztoken,
+                        fail_log=fail_log,
+                        obj_id=objectid,
+                        label=f"post_annotation:{catalog_id}",
+                    )
+                    fritz_limiter()
+        if fail_log.exists():
+            Slacker(webhook_url=os.environ.get("slack_webhook_kira")).generic_slack_message(
+                f"Some candidates failed to post to Fritz — inspect logs in data/crossmatch_results/{fail_log.name}"
+            )
 
     # ── Optionally send Slack ────────────────────────────────────────────────────────────────
     if args.slack:

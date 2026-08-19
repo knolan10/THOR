@@ -34,6 +34,8 @@ python src/thor/crossmatch_alerts.py --start 06-28-2026 --end 06-30-2026
 
 To apply additional TDE-specific filtering, pass `--additional_filtering tde_filter`. Add flag `--save_raw_alerts` to save raw alerts to `data/lsst_alert_download/raw_files/`, and flag `--save_results` in order to save the crossmatch details locally to `data/lsst_alert_download/`. A summary of results will be printed in command line, but the `--scan` flag can also be included to open a temp jupyter notebook in browser and use Babamul's scanning tool. Pass `--slack` to send a summary of results to Slack.
 
+Pass `--post_fritz` to automatically post crossmatch candidates to [Fritz](https://fritz.science/) as scannable candidates with catalog crossmatch annotations; this requires `fritz_token`, `filterid`, `groupid`, and `broker_id` set in a local `.env` file. If more than 500 candidates are found, Fritz posting is skipped and a Slack notification is sent instead.
+
 Pass `--method prost` to use probabilistic host association via [astro_prost](https://github.com/alexandergagliano/galaxy-association) instead of cone search. For efficiency, this will run a 10 arcsec consearch first to remove alerts with no nearby hosts.
 
 ```bash
