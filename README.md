@@ -21,7 +21,7 @@ To fetch and visualise LSST alerts for a given night, run:
 ```bash
 python src/thor/summarize_rubin_alerts.py
 # or with a date range:
-python src/thor/summarize_rubin_alerts.py 07-11-2026 07-15-2026
+python src/thor/summarize_rubin_alerts.py 07-01-2026 07-31-2026
 ```
 
 This uses the Babamul alert broker to fetch alerts, which requires user credentials stored in a .env file locally. Omit dates to default to the previous night. The generated skymap is saved to `data/plots/`
@@ -46,6 +46,14 @@ Results are saved as a `.csv` (one row per transient) if . Transients with a hos
 
 The script currently uses galaxy offset as the default scoring property, with a `uniform(0, 10)` prior and `gamma(a=0.75)` likelihood. Redshift information is loaded from catalogs where available and can be included in scoring via custom priors. For more flexibility, see the Prost section of the [crossmatching notebook](docs/notebooks/Example_LSST_Catalog_Crossmatching.ipynb) or the [astro_prost documentation](https://github.com/alexandergagliano/galaxy-association) for the full list of supported properties and association options.
 
+
+To crossmatch one or more RA/Dec coordinates against all available catalogs and print results, run:
+
+```bash
+python -m thor.catalog_crossmatch_from_coords --coords 150.1234,2.5678 34.5678,-5.1234
+```
+
+Pass `--radius` to change the match radius (default 5") and `--catalog` to restrict to a specific catalog file.
 
 ### Data
 
