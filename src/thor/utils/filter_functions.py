@@ -6,6 +6,7 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.table import Table
 import astropy.units as u
+import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 from collections import defaultdict
@@ -595,4 +596,84 @@ def _crossmatch_prost(ra_list, dec_list, name_list, fits_files, catalog_path, pr
         )
 
     return results
+
+
+def plot_redshift_histogram(
+    catalog_path: str | Path | None = None,
+    z_bins: int | np.ndarray = 100,
+    z_range: tuple[float, float] = (0.0, 8.0),
+    ax: "plt.Axes | None" = None,
+) -> "plt.Axes":
+    """
+    Plot a stacked histogram of galaxy counts as a function of redshift, with
+    each catalog drawn in a distinct color.
+
+    For ASTRODEEP catalogs the best available redshift is used: ``zspec`` when
+    valid (> 0), otherwise ``zphot``.  All other catalogs use the ``z`` column.
+
+    Parameters
+    ----------
+    catalog_path : str or Path, optional
+        Directory containing the ``.fits`` catalogs.  Defaults to
+        ``data/catalogs/`` at the repo root.
+    z_bins : int or array-like
+        Number of bins or explicit bin edges passed to ``plt.hist``. Default 100.
+    z_range : (float, float)
+        (z_min, z_max) range for the histogram. Default (0.0, 8.0).
+    ax : matplotlib Axes, optional
+        Axes to draw on.  A new figure is created when *None* (default).
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+    """
+    if catalog_path is None:
+        catalog_path = Path(__file__).resolve().parents[3] / "data" / "catalogs"
+    catalog_path = Path(catalog_path)
+
+    fits_files = sorted(f for f in os.listdir(catalog_path) if f.endswith(".fits"))
+    if not fits_files:
+        raise FileNotFoundError(f"No .fits files found in {catalog_path}")
+
+    # Collect redshifts per catalog
+    labels, z_arrays = [], []
+    for fname in fits_files:
+        with fits.open(catalog_path / fname) as hdul:
+            data = hdul[1].data
+            cols = [c.name.lower() for c in hdul[1].columns]
+
+        if "zspec" in cols:
+            zspec = data["zspec"].astype(float)
+            zphot = data["zphot"].astype(float)
+            z = np.where(zspec > 0, zspec, zphot)
+        else:
+            z = data["z"].astype(float)
+
+        valid = np.isfinite(z) & (z >= z_range[0]) & (z <= z_range[1])
+        labels.append(fname.replace("_cut.fits", ""))
+        z_arrays.append(z[valid])
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(12, 5))
+
+    colors = plt.cm.tab10(np.linspace(0, 1, len(labels)))
+    ax.hist(
+        z_arrays,
+        bins=z_bins,
+        range=z_range,
+        stacked=True,
+        label=labels,
+        color=colors,
+        edgecolor="none",
+        alpha=0.85,
+    )
+
+    ax.set_xlabel("Redshift $z$", fontsize=13)
+    ax.set_ylabel("Galaxy count", fontsize=13)
+    ax.set_title("Galaxy count vs. redshift by catalog", fontsize=14)
+    ax.legend(fontsize=8, loc="upper right", framealpha=0.7)
+    ax.set_xlim(z_range)
+    plt.tight_layout()
+    plt.show()
+    return ax
 
