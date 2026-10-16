@@ -303,6 +303,7 @@ def load_redback_result(
     nlive=500,
     exclude_bands=None,
     base_dir='redback_inference',
+    data_dir=None,
     random_models=100,
     plot=False,
 ):
@@ -322,8 +323,13 @@ def load_redback_result(
     exclude_bands : list or None
         Bands to exclude when recreating the transient object.
     base_dir : str
-        Root directory containing the redback_inference subdirectory.
+        Root directory containing the inference output subdirectories.
         Default: 'redback_inference'.
+    data_dir : str or None
+        Directory where redback writes/reads its data CSVs (e.g.
+        'tidal_disruption_event/<name>.csv').  If None, defaults to the
+        parent of base_dir so data files land next to the inference directory
+        rather than in the notebook's CWD.
     random_models : int
         Number of posterior draws to overplot. Default: 100.
     plot : bool
@@ -341,13 +347,18 @@ def load_redback_result(
         label=f'{name}_nlive{nlive}',
     )
 
-    data = load_data_redback_object(object_name=name, data_source=data_source)
+    if data_dir is None:
+        data_dir = os.path.dirname(os.path.abspath(base_dir))
+
+    data = load_data_redback_object(object_name=name, data_source=data_source,
+                                    outdir=data_dir)
     transient = create_redback_transient(
         object_name=name,
         data_source=data_source,
         data=data,
         data_mode='flux_density',
         exclude_bands=exclude_bands,
+        outdir=data_dir,
     )
 
     if plot:
@@ -379,6 +390,7 @@ def plot_lsst_projection(
     n_draws=200,
     n_times=400,
     figsize=(10, 5),
+    plot_magnitude=True,
 ):
     """
     Plot posterior-predictive lightcurves projected onto all LSST ugrizy bands.
@@ -404,6 +416,9 @@ def plot_lsst_projection(
         Number of time grid points. Default: 400.
     figsize : tuple
         Figure size. Default: (10, 5).
+    plot_magnitude : bool
+        If True (default), plot AB magnitude with brighter values higher.
+        If False, plot flux density in mJy.
 
     Returns
     -------
@@ -440,6 +455,9 @@ def plot_lsst_projection(
                 break
         else:
             draws = np.array(draws)
+            if plot_magnitude:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    draws = -2.5 * np.log10(draws * 1e-3 / 3631.0)
             median = np.median(draws, axis=0)
             lo, hi = np.percentile(draws, [16, 84], axis=0)
             ax.fill_between(times, lo, hi, alpha=0.2, color=color)
@@ -450,7 +468,11 @@ def plot_lsst_projection(
 
     z_label = f'z = {redshift}' if redshift is not None else 'fitted z'
     ax.set_xlabel('Observer-frame time (days)', fontsize=13)
-    ax.set_ylabel('Flux density (mJy)', fontsize=13)
+    if plot_magnitude:
+        ax.set_ylabel('AB magnitude', fontsize=13)
+        ax.invert_yaxis()
+    else:
+        ax.set_ylabel('Flux density (mJy)', fontsize=13)
     ax.set_title(f'{name} — {model} projected onto LSST ugrizy ({z_label})', fontsize=14)
     ax.legend(fontsize=12)
     plt.tight_layout()
@@ -603,6 +625,98 @@ def plot_redshift_evolution(
     plt.show()
 
     return fig, axes
+
+
+_BAND_FREQS_HZ = {
+    'u': 8.60e14, 'g': 6.38e14, 'r': 4.86e14,
+    'i': 4.01e14, 'z': 3.30e14, 'y': 3.00e14,
+}
+
+_TDE_ANALYTICAL_DEFAULTS = {
+    'mej': 1.0, 'vej': 1e4, 'kappa': 0.1, 'kappa_gamma': 10.0,
+    'temperature_floor': 5000.0, 'l0': 1e55, 't_0_turn': 50.0,
+}
+
+
+def plot_tde_analytical(
+    redshift=0.01,
+    times=None,
+    params=None,
+    bands=None,
+    ax=None,
+):
+    """
+    Plot a TDE analytical model light curve with manually specified parameters.
+
+    Parameters
+    ----------
+    redshift : float
+        Source redshift. Default: 0.01.
+    times : array-like or None
+        Observer-frame time grid in days. Default: np.linspace(0, 300, 500).
+    params : dict or None
+        Model parameters passed to tde_analytical. Any keys not supplied
+        fall back to _TDE_ANALYTICAL_DEFAULTS:
+        mej, vej, kappa, kappa_gamma, temperature_floor, l0, t_0_turn.
+    bands : list of str or None
+        Bands to plot. Must be keys of _BAND_FREQS_HZ.
+        Default: all six ugrizy bands.
+    ax : matplotlib Axes or None
+        Axes to plot into. If None, creates a (3:1) two-panel figure with
+        a parameter summary on the right.
+
+    Returns
+    -------
+    fig, ax : Figure and Axes  (fig is None when an external ax is passed)
+    """
+    import numpy as np
+    from redback.transient_models.tde_models import tde_analytical
+
+    if times is None:
+        times = np.linspace(0, 300, 500)
+    times = np.asarray(times, dtype=float)
+
+    p = dict(_TDE_ANALYTICAL_DEFAULTS)
+    if params is not None:
+        p.update(params)
+
+    if bands is None:
+        bands = list(_BAND_FREQS_HZ.keys())
+
+    standalone = ax is None
+    if standalone:
+        fig, (ax, ax_text) = plt.subplots(
+            1, 2, figsize=(12, 5), gridspec_kw={'width_ratios': [3, 1]}
+        )
+    else:
+        fig = None
+
+    for band in bands:
+        freq = _BAND_FREQS_HZ[band]
+        color = BAND_COLORS.get(band, None)
+        flux = tde_analytical(
+            times, redshift=redshift, **p,
+            frequency=np.full(len(times), freq),
+            output_format='flux_density',
+        ) * 1e-26  # mJy → erg/s/cm²/Hz
+        ax.plot(times, flux, color=color, label=band)
+
+    ax.legend(fontsize=13)
+    ax.set_xlabel('Time (days)', size=16)
+    ax.set_ylabel(r'Flux density (erg s$^{-1}$ cm$^{-2}$ Hz$^{-1}$)', size=16)
+    ax.set_title(f'TDE Analytical Light Curve  z = {redshift}', size=16)
+
+    if standalone:
+        param_str = f'redshift = {redshift}\n' + '\n'.join(
+            f'{k} = {v:.3g}' for k, v in p.items()
+        )
+        ax_text.axis('off')
+        ax_text.text(0.1, 0.5, param_str, transform=ax_text.transAxes,
+                     fontsize=12, verticalalignment='center', family='monospace')
+        plt.tight_layout()
+        plt.show()
+
+    return fig, ax
 
 
 class RubinSimulator:

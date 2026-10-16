@@ -291,8 +291,8 @@ def _synthetic_ab_mag(f_lambda, wl_aa, filt_wl_aa, filt_thru):
     if T.sum() == 0 or not np.any(f_lambda > 0):
         return np.inf
     f_nu  = f_lambda * wl_aa ** 2 / _C_AA_S   # erg/s/cm²/Hz
-    num   = np.trapezoid(f_nu * T * wl_aa, wl_aa)
-    denom = np.trapezoid(T * wl_aa, wl_aa)
+    num   = np.trapz(f_nu * T * wl_aa, wl_aa)
+    denom = np.trapz(T * wl_aa, wl_aa)
     if denom <= 0 or num <= 0:
         return np.inf
     return -2.5 * np.log10(num / denom) - 48.6
@@ -852,6 +852,69 @@ def plot_transient_magnitude_timescale(
     if standalone:
         plt.tight_layout()
         plt.show()
+
+
+def blackbody_apparent_mag(
+    temperature_k,
+    redshift,
+    filter_band_or_range,
+    L_peak_erg_s=1e44,
+    ebv=0.0,
+    rv=3.1,
+    apply_igm=True,
+    filter_dir=None,
+):
+    """
+    Compute the apparent AB magnitude of a blackbody source through a filter.
+
+    Uses the same SED model as `simulate_lsst_lightcurve`:
+        F_λ_obs = π B_λ(λ_rest, T) × (R / d_L)² / (1+z)
+    where R is the blackbody radius implied by `L_peak_erg_s` and `temperature_k`.
+
+    Parameters
+    ----------
+    temperature_k : float
+        Blackbody temperature [K].
+    redshift : float
+        Source redshift.
+    filter_band_or_range : str or (float, float)
+        Either a Rubin band name ('u','g','r','i','z','y') or a
+        (w_min, w_max) wavelength range in Angstroms for a top-hat filter.
+    L_peak_erg_s : float
+        Bolometric luminosity [erg/s]. Default 1e44 (typical TDE peak).
+    ebv : float
+        Milky Way E(B-V) foreground dust. Default 0.
+    rv : float
+        R_V for MW dust. Default 3.1.
+    apply_igm : bool
+        Apply Madau (1995) IGM Lyα forest absorption. Default True.
+    filter_dir : str or None
+        Directory for Rubin filter .dat files; downloads if missing.
+        Only used when `filter_band_or_range` is a band string.
+
+    Returns
+    -------
+    float
+        Apparent AB magnitude, or np.inf if no measurable flux in band.
+    """
+    # Build filter throughput curve
+    if isinstance(filter_band_or_range, str):
+        if filter_dir is None:
+            filter_dir = os.path.join(os.path.dirname(__file__), 'data', 'filters')
+        rubin_filters = load_rubin_filters(filter_dir)
+        filt_wl, filt_thru = rubin_filters[filter_band_or_range]
+    else:
+        w_min, w_max = filter_band_or_range
+        filt_wl   = np.array([w_min, w_min, w_max, w_max], dtype=float)
+        filt_thru = np.array([0.0,   1.0,   1.0,   0.0],   dtype=float)
+
+    mag = _peak_band_mag(
+        redshift, L_peak_erg_s, temperature_k,
+        filt_wl, filt_thru,
+        ebv=ebv, rv=rv, apply_igm=apply_igm,
+    )
+    print(f"T={temperature_k} K  z={redshift}  filter={filter_band_or_range}  m_AB={mag:.3f}")
+    return mag
 
 
 def plot_rubin_abs_mag_limit(z_max=5, ax=None):
