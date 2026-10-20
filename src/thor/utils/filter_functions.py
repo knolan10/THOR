@@ -7,6 +7,8 @@ from astropy.io import fits
 from astropy.table import Table
 import astropy.units as u
 import matplotlib.pyplot as plt
+from matplotlib import rcParams
+rcParams["font.family"] = "Liberation Serif"
 import pandas as pd
 import numpy as np
 from collections import defaultdict
@@ -668,10 +670,12 @@ def plot_redshift_histogram(
         alpha=0.85,
     )
 
-    ax.set_xlabel("Redshift $z$", fontsize=13)
-    ax.set_ylabel("Galaxy count", fontsize=13)
-    ax.set_title("Galaxy count vs. redshift by catalog", fontsize=14)
-    ax.legend(fontsize=8, loc="upper right", framealpha=0.7)
+    ax.set_yscale("log")
+    ax.set_xlabel("Redshift $z$", fontsize=20)
+    ax.set_ylabel("Galaxy count", fontsize=20)
+    ax.set_title("Galaxy count vs. redshift by catalog", fontsize=22)
+    ax.tick_params(labelsize=16)
+    ax.legend(fontsize=14, loc="upper left", bbox_to_anchor=(1, 1), framealpha=0.7)
     ax.set_xlim(z_range)
     plt.tight_layout()
     plt.show()
