@@ -106,5 +106,17 @@ catalogs = {
         "z_max": 20,
         "z_median": 0.001,
         "number_objects": 127692,
+    },
+    "SPECZ_LBG_cats_cut.fits": {
+        "link": "http://cesam.lam.fr",  # VUDS: http://cesam.lam.fr/vuds, VVDS: http://cesam.lam.fr/vvds, VANDELS: http://vandels.inaf.it
+        "ra_range": [34.2, 53.5],                                                                                                                                  
+        "dec_range": [-28, -5],  
+        "coverage_deg2": "420", # not accurate bc there is spotty coverage within ra/dec range                                                                                                                                                               
+        "ebv": 0.008,  # Schlegel 1998                                                                                                                                                                          
+        "global_ra_unc_mas": None,                                                                                                                                                            
+        "global_dec_unc_mas": None,                                                                                                                                                           
+        "z_max": 6,                                                                                                                                                                          
+        "z_median": "2.4767",                                                                                                                                                                     
+        "number_objects": 1063,  # VUDS=151, VVDS=669, VANDELS=243 after zflag>=3 cut                                                                                                        
     }
 }
