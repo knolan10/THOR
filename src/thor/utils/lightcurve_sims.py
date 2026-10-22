@@ -44,7 +44,7 @@ def plot_blackbody_sed_with_filters(temperature_k, redshifts, solid_angle_sr=np.
     bb = BlackBody(temperature=temperature_k * u.K)
     wavelengths_rest = np.linspace(500, 15000, 1000) * u.AA
 
-    # 1. Rubin Filter Regions
+    # 1. Rubin Filter Regions plot in background
     rubin_filters = {
         'u': (3200, 4000), 'g': (4000, 5520), 'r': (5520, 6910),
         'i': (6910, 8180), 'z': (8180, 9220), 'y': (9220, 10600)
