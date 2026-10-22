@@ -45,6 +45,11 @@ def main():
         survey="LSST",
         start_time=start,
         end_time=end,
+        min_drb=0.4,
+        is_rock=False,
+        is_star=False,
+        is_near_brightstar=False,
+        is_stationary=True,
         save=False,
     )
 

@@ -93,6 +93,7 @@ def babamul_get_alerts(
     checkpoint_path: str | None = None,
     checkpoint_every: int = 10,
     save: bool = True,
+    strip_cutouts: bool = True,
     verbose: bool = False,
 ):
     """
@@ -134,6 +135,10 @@ def babamul_get_alerts(
         For multi-day ranges, alerts are saved in chunks of checkpoint_every nights.
         For single-day fetches, all alerts are saved in one file on completion.
         Set to False to return alerts in memory only.
+    strip_cutouts : bool
+        If True (default), drop cutoutScience/Template/Difference before validation.
+        Each cutout is ~100 KB; stripping reduces memory by ~95% for large fetches.
+        Set to False only if you need to display or save the image stamps.
     verbose : bool
         If True, print progress messages. Default False.
 
@@ -190,7 +195,10 @@ def babamul_get_alerts(
             print(f"Fetching alerts for JD {start_str} to {end_str}...")
         valid, skipped = [], []
         first_error = None
+        _CUTOUT_KEYS = ("cutoutScience", "cutoutTemplate", "cutoutDifference")
         for raw in _fetch_raw(start_jd, end_jd):
+            if strip_cutouts:
+                raw = {k: v for k, v in raw.items() if k not in _CUTOUT_KEYS}
             try:
                 valid.append(alert_model.model_validate(_coerce_alert(raw)))
             except ValidationError as e:
@@ -268,7 +276,13 @@ def babamul_get_alerts(
                 print(f"Last completed checkpoint: up to {_jd_to_datestr(last_saved_jd)} (JD {last_saved_jd}).")
                 print(f"To resume, set start_time=\"{_jd_to_datestr(last_saved_jd)}\".")
             if not isinstance(e, KeyboardInterrupt):
+                import traceback
                 print(f"Error: {e}")
+                print(f"Error type: {type(e).__name__}")
+                if hasattr(e, 'response') and e.response is not None:
+                    print(f"Response status: {e.response.status_code}")
+                    print(f"Response body: {e.response.text[:2000]}")
+                traceback.print_exc()
             return all_alerts
 
         if chunk_alerts:

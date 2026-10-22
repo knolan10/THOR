@@ -47,6 +47,14 @@ Results are saved as a `.csv` (one row per transient) if . Transients with a hos
 The script currently uses galaxy offset as the default scoring property, with a `uniform(0, 10)` prior and `gamma(a=0.75)` likelihood. Redshift information is loaded from catalogs where available and can be included in scoring via custom priors. For more flexibility, see the Prost section of the [crossmatching notebook](docs/notebooks/Example_LSST_Catalog_Crossmatching.ipynb) or the [astro_prost documentation](https://github.com/alexandergagliano/galaxy-association) for the full list of supported properties and association options.
 
 
+To crossmatch a CSV catalog of objects (e.g. from a follow-up survey) against all available catalogs, run:
+
+```bash
+python -m thor.generic_crossmatch data/decam_objects.csv --method conesearch --save
+```
+
+The input CSV must have `ra` and `dec` columns (degrees) and an `objid`, `id`, or `name` column as the object identifier. Results are returned as a dictionary keyed by objid, with each matched catalog row stored under its catalog name, and optionally saved to `data/crossmatch_results/`.
+
 To crossmatch one or more RA/Dec coordinates against all available catalogs and print results, run:
 
 ```bash

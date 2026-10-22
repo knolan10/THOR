@@ -37,6 +37,7 @@ catalogs = {
     },
     "CLAUDS_SourceExtractor_DEEP23_cut.fits": {
         "link": 'https://www.clauds.net/available-data',
+        "color": "#17becf",  # cyan: avoids clash with YlOrRd heatmap
         "ra_range": [350.2710, 354.1673],
         "dec_range": [-1.5791, 1.2104],
         "coverage_deg2": 10.87,
@@ -109,8 +110,9 @@ catalogs = {
     },
     "SPECZ_LBG_cats_cut.fits": {
         "link": "http://cesam.lam.fr",  # VUDS: http://cesam.lam.fr/vuds, VVDS: http://cesam.lam.fr/vvds, VANDELS: http://vandels.inaf.it
-        "ra_range": [34.2, 53.5],                                                                                                                                  
-        "dec_range": [-28, -5],  
+        "star_locations": [(34.3, -5.2), (53.1, -27.9)],  # UDS and CDFS/ECDFS field centres
+        "ra_range": [34.2, 53.5],
+        "dec_range": [-28, -5],
         "coverage_deg2": "420", # not accurate bc there is spotty coverage within ra/dec range                                                                                                                                                               
         "ebv": 0.008,  # Schlegel 1998                                                                                                                                                                          
         "global_ra_unc_mas": None,                                                                                                                                                            

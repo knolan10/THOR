@@ -54,7 +54,7 @@ _WEATHER_VARS = [
 # setting labeling for skymap plot
 _DDF_LABEL_OFFSETS = {
     "COSMOS":    (6, -14),  # shifted down to avoid overlap with RA axis labels
-    "XMM-LSS":  (6,   4),
+    "XMM-LSS":  (-70,   4),
     "ELAIS-S1": (6,   4),
     "ECDFS":    (6,   4),
     "EDFS-a":   (10, -18),  # shifted further down from EDFS-b
@@ -239,10 +239,14 @@ def _draw_catalog_footprints(ax, plot_catalogs, catalog_path=None, mollweide=Tru
         meta = _catalog_meta[name]
         ra_min, ra_max = meta["ra_range"]
         dec_min, dec_max = meta["dec_range"]
-        color = _CAT_COLORS[i % len(_CAT_COLORS)]
+        color = meta.get("color") or _CAT_COLORS[i % len(_CAT_COLORS)]
         label = name.replace("_cut.fits", "")
-        area_deg2 = (ra_max - ra_min) * (dec_max - dec_min)
-        if area_deg2 < 5:
+        # explicit star_locations overrides the area threshold
+        if "star_locations" in meta:
+            for loc_ra, loc_dec in meta["star_locations"]:
+                star_entries.append((loc_ra, loc_dec, color, label))
+                label = "_nolegend_"  # only add legend entry for first location
+        elif (ra_max - ra_min) * (dec_max - dec_min) < 5:
             star_entries.append(((ra_min + ra_max) / 2, (dec_min + dec_max) / 2, color, label))
         else:
             rect_entries.append((ra_min, ra_max, dec_min, dec_max, color, label))
@@ -302,7 +306,7 @@ def _draw_catalog_footprints(ax, plot_catalogs, catalog_path=None, mollweide=Tru
                        alpha=0.9, zorder=4, linewidths=0)
 
 
-def plot_skymap(alerts=None, title=None, heatmap=False, bin_size_deg=3.5,
+def plot_skymap(alerts=None, ra=None, dec=None, title=None, heatmap=False, bin_size_deg=3.5,
                 plot_ddf=False, plot_catalogs=False, catalog_path=None, save=False):
     """
     Full-sky Mollweide projection with zoomed footprint inset and band legend.
@@ -312,6 +316,9 @@ def plot_skymap(alerts=None, title=None, heatmap=False, bin_size_deg=3.5,
     alert counts binned into bin_size_deg × bin_size_deg cells instead of
     individual scatter points.  The zoom inset and band legend are hidden in
     this mode.
+
+    ra and dec may be passed as arrays of degrees (instead of alerts) to plot
+    arbitrary coordinates in heatmap mode.
 
     If plot_ddf=True, DDF field centres are overlaid as labelled open circles
     on both the Mollweide panel and the zoom inset.
@@ -327,29 +334,41 @@ def plot_skymap(alerts=None, title=None, heatmap=False, bin_size_deg=3.5,
         b = a.candidate.band
         return (b.value if hasattr(b, "value") else str(b)) if b is not None else "?"
 
-    if alerts is None and not plot_catalogs and not plot_ddf:
+    if alerts is None and ra is None and not plot_catalogs and not plot_ddf:
         print("Nothing to plot.")
         return
 
     # ── heatmap / catalog-only mode ──────────────────────────────────────────
-    if heatmap or alerts is None:
+    if heatmap or alerts is None or ra is not None:
         fig = plt.figure(figsize=(14, 7), facecolor="#0f0f1a")
         ax_sky = fig.add_subplot(111, projection="mollweide")
         ax_sky.set_facecolor("#0f0f1a")
 
-        if alerts:
+        if ra is not None:
+            all_ras  = np.asarray(ra,  dtype=float)
+            all_decs = np.asarray(dec, dtype=float)
+            mask = np.isfinite(all_ras) & np.isfinite(all_decs)
+            all_ras, all_decs = all_ras[mask], all_decs[mask]
+            alerts_for_heatmap = True  # trigger heatmap drawing below
+        else:
+            alerts_for_heatmap = bool(alerts)
+
+        if alerts_for_heatmap and ra is None:
             all_ras  = np.array([a.candidate.ra  for a in alerts])
             all_decs = np.array([a.candidate.dec for a in alerts])
 
-            # bin edges in degrees
-            ra_bins  = np.arange(0,   360 + bin_size_deg, bin_size_deg)
-            dec_bins = np.arange(-90, 90  + bin_size_deg, bin_size_deg)
+        if alerts_for_heatmap or ra is not None:
+            # Remap RA to [-180, 180] so bin edges stay monotonic for pcolormesh.
+            # Histogramming in [0, 360] then wrapping edges to [-π, π] produces a
+            # discontinuity at RA≈180° that causes full-width stripe artifacts.
+            all_ras_wrapped = np.where(all_ras > 180, all_ras - 360, all_ras)
+            ra_bins  = np.arange(-180, 180 + bin_size_deg, bin_size_deg)
+            dec_bins = np.arange(-90,   90 + bin_size_deg, bin_size_deg)
 
-            counts, _, _ = np.histogram2d(all_ras, all_decs, bins=[ra_bins, dec_bins])
+            counts, _, _ = np.histogram2d(all_ras_wrapped, all_decs, bins=[ra_bins, dec_bins])
 
-            # convert bin edges to radians for Mollweide, wrap RA to [-pi, pi]
+            # bin edges already in [-π, π], no wrapping needed
             ra_edge_rad  = np.radians(ra_bins)
-            ra_edge_rad  = np.where(ra_edge_rad > np.pi, ra_edge_rad - 2 * np.pi, ra_edge_rad)
             dec_edge_rad = np.radians(dec_bins)
 
             ra_edge_grid, dec_edge_grid = np.meshgrid(ra_edge_rad, dec_edge_rad, indexing="ij")
@@ -361,17 +380,20 @@ def plot_skymap(alerts=None, title=None, heatmap=False, bin_size_deg=3.5,
                 -ra_edge_grid, dec_edge_grid, plot_counts,
                 cmap="YlOrRd", alpha=0.85, shading="flat",
                 norm=mcolors.LogNorm(vmin=1, vmax=plot_counts.max()),
+                zorder=1,
             )
             cbar = fig.colorbar(sc, ax=ax_sky, orientation="horizontal",
                                 pad=0.05, fraction=0.04, aspect=30)
-            cbar.set_label("alerts per bin", color="#aaaaaa", fontsize=23)
+            cbar_label = "objects per bin" if ra is not None else "alerts per bin"
+            cbar.set_label(cbar_label, color="#aaaaaa", fontsize=23)
             cbar.ax.tick_params(colors="#aaaaaa", labelsize=20)
 
         if plot_catalogs is not False:
             _draw_catalog_footprints(ax_sky, plot_catalogs, catalog_path, mollweide=True)
             handles, labels = ax_sky.get_legend_handles_labels()
             if handles:
-                leg = ax_sky.legend(handles, labels, loc="upper right",
+                leg = ax_sky.legend(handles, labels, loc="upper left",
+                                    bbox_to_anchor=(1.02, 1), borderaxespad=0,
                                     framealpha=0.4, labelcolor="#aaaaaa",
                                     facecolor="#1a1a2e", edgecolor="#555555",
                                     fontsize=11, title="Catalogs", title_fontsize=12)
@@ -393,11 +415,11 @@ def plot_skymap(alerts=None, title=None, heatmap=False, bin_size_deg=3.5,
                             color="#bbbbbb", fontsize=17, zorder=5)
         ax_sky.grid(True, alpha=0.3, color="white", linewidth=0.65)
         default_title = (
-            "Catalog coverage skymap" if alerts is None
-            else f"Alert density heatmap  ({bin_size_deg}° bins)"
+            "Catalog coverage skymap" if (alerts is None and ra is None)
+            else f"Object density heatmap  ({bin_size_deg}° bins)"
         )
         ax_sky.set_title(title or default_title, color="white", pad=14, fontsize=32)
-        plt.tight_layout()
+        fig.tight_layout(rect=[0, 0, 0.82, 1])
         if save:
             _save_plot(fig, title)
         return
